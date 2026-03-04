@@ -1,3 +1,5 @@
+import copy
+import torch
 import numpy as np
 from sklearn.model_selection import KFold, train_test_split
 from itertools import product
@@ -12,12 +14,17 @@ from base_model import BaseModel
 class DataDrivenModel(BaseModel):
     """Pure data-driven model: standard MLP with MSE/MAE loss, no physics."""
 
-    def train(self, train_loader, val_loader=None, live_plot=False):
+    def train(self, train_loader, val_loader=None, live_plot=False, checkpoint_path=None):
         optimizer = self.get_optimizer()
         loss_function = self.get_loss_function()
 
         train_losses = []
         val_losses = []
+        best_state = None
+        best_val_loss = float("inf")
+        epochs_without_improvement = 0
+        patience = TrainingConfig.EARLY_STOPPING_PATIENCE
+        min_delta = TrainingConfig.EARLY_STOPPING_MIN_DELTA
 
         if live_plot:
             plt.ion()
@@ -50,7 +57,6 @@ class DataDrivenModel(BaseModel):
             if val_loader is not None:
                 self.model.eval()
                 val_running_loss = 0.0
-                import torch
                 with torch.no_grad():
                     for X_val_batch, y_val_batch in val_loader:
                         X_val_batch, y_val_batch = X_val_batch.to(self.device), y_val_batch.to(self.device)
@@ -61,6 +67,15 @@ class DataDrivenModel(BaseModel):
                 val_losses.append(avg_val_loss)
                 print(f"Epoch [{epoch+1}/{self.epochs}], Training Loss: {avg_train_loss:.8f}, "
                       f"Validation Loss: {avg_val_loss:.8f}")
+
+                if (best_val_loss - avg_val_loss) > min_delta:
+                    best_val_loss = avg_val_loss
+                    best_state = copy.deepcopy(self.model.state_dict())
+                    epochs_without_improvement = 0
+                    if checkpoint_path is not None:
+                        torch.save(best_state, checkpoint_path)
+                else:
+                    epochs_without_improvement += 1
             else:
                 val_losses.append(None)
                 print(f"Epoch [{epoch+1}/{self.epochs}], Training Loss: {avg_train_loss:.8f}")
@@ -76,10 +91,21 @@ class DataDrivenModel(BaseModel):
                 ax.legend()
                 plt.pause(0.01)
 
+            if val_loader is not None and epochs_without_improvement >= patience:
+                print(
+                    f"Early stopping at epoch {epoch+1}: "
+                    f"no Validation improvement > {min_delta} for {patience} epochs."
+                )
+                break
+
         if live_plot:
             plt.ioff()
             plt.show()
             fig.savefig('training_validation_loss_plot_DATA.png')
+
+        if best_state is not None:
+            self.model.load_state_dict(best_state)
+            print(f"Restored best model state (Validation Loss: {best_val_loss:.8f})")
 
     def cross_validate(self, X, y, data_processor, k_folds=5):
         kfold = KFold(n_splits=k_folds, shuffle=True, random_state=DataConfig.RANDOM_STATE)
@@ -178,5 +204,10 @@ if __name__ == "__main__":
         final_train_loader = final_model.prepare_dataloader(X_train_final, y_train_final)
         final_val_loader = final_model.prepare_dataloader(X_val_final, y_val_final)
 
-        final_model.train(final_train_loader, val_loader=final_val_loader, live_plot=True)
+        final_model.train(
+            final_train_loader,
+            val_loader=final_val_loader,
+            live_plot=True,
+            checkpoint_path="best_model_DATA.pt",
+        )
         final_model.evaluate(X_test, y_test, dataset_type="Test", data_processor=data_processor)

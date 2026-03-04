@@ -8,5 +8,10 @@ venv/
 .vscode/
 best_hyperparameters_*.txt
 training_validation_loss_plot_*.png
+best_model_*.pt
+validation_metrics_*.csv
 .cursor/
 .serena/
+PhD/
+data/
+results/

@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
-from config import DataConfig
+from config import DataConfig, TrainingConfig
 
 
 def initialize_weights(model):
@@ -66,9 +66,16 @@ class BaseModel:
 
     def get_optimizer(self):
         optimizers = {
-            'Adam': lambda: optim.Adam(self.model.parameters(), lr=self.lr),
-            'SGD': lambda: optim.SGD(self.model.parameters(), lr=self.lr, momentum=0.9),
-            'RMSprop': lambda: optim.RMSprop(self.model.parameters(), lr=self.lr),
+            'Adam': lambda: optim.Adam(
+                self.model.parameters(), lr=self.lr, weight_decay=TrainingConfig.WEIGHT_DECAY
+            ),
+            'SGD': lambda: optim.SGD(
+                self.model.parameters(), lr=self.lr, momentum=0.9,
+                weight_decay=TrainingConfig.WEIGHT_DECAY
+            ),
+            'RMSprop': lambda: optim.RMSprop(
+                self.model.parameters(), lr=self.lr, weight_decay=TrainingConfig.WEIGHT_DECAY
+            ),
             'LBFGS': lambda: optim.LBFGS(
                 self.model.parameters(), lr=self.lr,
                 max_iter=20, history_size=10, line_search_fn="strong_wolfe"

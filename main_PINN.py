@@ -1,3 +1,4 @@
+import copy
 import torch
 import numpy as np
 import pandas as pd
@@ -86,12 +87,17 @@ class PINNModel(BaseModel):
         return torch.mean(outputs_boundary**2)
 
     def train(self, train_loader, X_train_unscaled, feature_indices, data_processor,
-              val_loader=None, live_plot=False):
+              val_loader=None, live_plot=False, checkpoint_path=None):
         optimizer = self.get_optimizer()
         loss_function = self.get_loss_function()
 
         train_losses = []
         val_losses = []
+        best_state = None
+        best_val_loss = float("inf")
+        epochs_without_improvement = 0
+        patience = TrainingConfig.EARLY_STOPPING_PATIENCE
+        min_delta = TrainingConfig.EARLY_STOPPING_MIN_DELTA
 
         if live_plot:
             plt.ion()
@@ -103,6 +109,7 @@ class PINNModel(BaseModel):
             running_data_loss = 0.0
             running_pde_loss = 0.0
             running_boundary_loss = 0.0
+            val_current = None
 
             if self.optimizer_choice == 'LBFGS':
                 X_batch, y_batch = train_loader.dataset.tensors
@@ -137,8 +144,8 @@ class PINNModel(BaseModel):
 
                 train_losses.append(running_loss)
                 if val_loader is not None:
-                    val_loss = self._evaluate_on_loader(val_loader)
-                    val_losses.append(val_loss)
+                    val_current = self._evaluate_on_loader(val_loader)
+                    val_losses.append(val_current)
             else:
                 total_batches = len(train_loader)
 
@@ -185,10 +192,10 @@ class PINNModel(BaseModel):
                 train_losses.append(avg_total_loss)
 
                 if val_loader is not None:
-                    val_loss = self._evaluate_on_loader(val_loader)
-                    val_losses.append(val_loss)
+                    val_current = self._evaluate_on_loader(val_loader)
+                    val_losses.append(val_current)
                     print(f"Epoch [{epoch+1}/{self.epochs}], Total Loss: {avg_total_loss:.8f}, "
-                          f"Validation Loss: {val_loss:.8f}")
+                          f"Validation Loss: {val_current:.8f}")
                 else:
                     val_losses.append(None)
                     print(f"Epoch [{epoch+1}/{self.epochs}], Total Loss: {avg_total_loss:.8f}")
@@ -204,10 +211,31 @@ class PINNModel(BaseModel):
                     ax.legend()
                     plt.pause(0.01)
 
+            if val_current is not None:
+                if (best_val_loss - val_current) > min_delta:
+                    best_val_loss = val_current
+                    best_state = copy.deepcopy(self.model.state_dict())
+                    epochs_without_improvement = 0
+                    if checkpoint_path is not None:
+                        torch.save(best_state, checkpoint_path)
+                else:
+                    epochs_without_improvement += 1
+
+                if epochs_without_improvement >= patience:
+                    print(
+                        f"Early stopping at epoch {epoch+1}: "
+                        f"no Validation improvement > {min_delta} for {patience} epochs."
+                    )
+                    break
+
         if live_plot:
             plt.ioff()
             plt.show()
             fig.savefig('training_validation_loss_plot_PINN.png')
+
+        if best_state is not None:
+            self.model.load_state_dict(best_state)
+            print(f"Restored best model state (Validation Loss: {best_val_loss:.8f})")
 
     def _evaluate_on_loader(self, data_loader):
         self.model.eval()
@@ -360,7 +388,7 @@ if __name__ == "__main__":
 
         final_model.train(
             final_train_loader, X_train_unscaled_final, feature_indices, data_processor,
-            val_loader=final_val_loader, live_plot=True,
+            val_loader=final_val_loader, live_plot=True, checkpoint_path="best_model_PINN.pt",
         )
 
         final_model.evaluate(X_test, y_test, dataset_type="Test", data_processor=data_processor)

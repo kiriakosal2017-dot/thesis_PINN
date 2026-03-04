@@ -64,8 +64,17 @@ class SequenceConfig:
     MAX_TIME_GAP = _get_float('MAX_TIME_GAP_SECONDS', '3600')
 
 
+class ModelConfig:
+    LSTM_HIDDEN_SIZE = _get_int('LSTM_HIDDEN_SIZE', '64')
+    LSTM_NUM_LAYERS = _get_int('LSTM_NUM_LAYERS', '1')
+    LSTM_DROPOUT = _get_float('LSTM_DROPOUT', '0.2')
+
+
 class TrainingConfig:
     EPOCHS_CV = _get_int('DEFAULT_EPOCHS_CV', '50')
     EPOCHS_FINAL = _get_int('DEFAULT_EPOCHS_FINAL', '200')
     OPTIMIZER = _get_str('DEFAULT_OPTIMIZER', 'Adam')
     LOSS_FUNCTION = _get_str('DEFAULT_LOSS_FUNCTION', 'MSE')
+    WEIGHT_DECAY = _get_float('WEIGHT_DECAY', '1e-5')
+    EARLY_STOPPING_PATIENCE = _get_int('EARLY_STOPPING_PATIENCE', '20')
+    EARLY_STOPPING_MIN_DELTA = _get_float('EARLY_STOPPING_MIN_DELTA', '1e-4')

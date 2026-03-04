@@ -1,3 +1,4 @@
+import copy
 import torch
 import torch.nn as nn
 import numpy as np
@@ -8,7 +9,7 @@ from itertools import product
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
-from config import DataConfig, ColumnConfig, ShipConfig, SequenceConfig, TrainingConfig
+from config import DataConfig, ColumnConfig, ShipConfig, SequenceConfig, TrainingConfig, ModelConfig
 from read_data import DataProcessor, create_sequences
 from base_model import initialize_weights
 
@@ -43,10 +44,10 @@ class LSTMPINNModel:
 
     KNOTS_TO_MS = 0.51444
 
-    def __init__(self, input_size, hidden_size=128, num_layers=2,
+    def __init__(self, input_size, hidden_size=64, num_layers=1, dropout=0.2,
                  lr=0.001, epochs=100, batch_size=32,
                  optimizer_choice='Adam', loss_function_choice='MSE',
-                 alpha=1.0, beta=0.1):
+                 alpha=1.0, beta=0.1, weight_decay=0.0):
         self.lr = lr
         self.epochs = epochs
         self.batch_size = batch_size
@@ -56,6 +57,8 @@ class LSTMPINNModel:
         self.beta = beta
         self.hidden_size = hidden_size
         self.num_layers = num_layers
+        self.dropout = dropout
+        self.weight_decay = weight_decay
         self.device = self._get_device()
 
         torch.manual_seed(DataConfig.RANDOM_STATE)
@@ -64,6 +67,7 @@ class LSTMPINNModel:
             input_size=input_size,
             hidden_size=hidden_size,
             num_layers=num_layers,
+            dropout=dropout,
         ).to(self.device)
 
     @staticmethod
@@ -81,9 +85,15 @@ class LSTMPINNModel:
 
     def get_optimizer(self):
         optimizers = {
-            'Adam': lambda: torch.optim.Adam(self.model.parameters(), lr=self.lr),
-            'SGD': lambda: torch.optim.SGD(self.model.parameters(), lr=self.lr, momentum=0.9),
-            'RMSprop': lambda: torch.optim.RMSprop(self.model.parameters(), lr=self.lr),
+            'Adam': lambda: torch.optim.Adam(
+                self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay
+            ),
+            'SGD': lambda: torch.optim.SGD(
+                self.model.parameters(), lr=self.lr, momentum=0.9, weight_decay=self.weight_decay
+            ),
+            'RMSprop': lambda: torch.optim.RMSprop(
+                self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay
+            ),
         }
         if self.optimizer_choice not in optimizers:
             raise ValueError(f"Optimizer '{self.optimizer_choice}' not recognized.")
@@ -203,16 +213,24 @@ class LSTMPINNModel:
         return physics_loss_normalized
 
     def train(self, train_loader, feature_indices, data_processor,
-              val_loader=None, live_plot=False):
+              val_loader=None, live_plot=False, metrics_output_path=None,
+              checkpoint_path="best_model_LSTM_PINN.pt"):
         optimizer = self.get_optimizer()
         loss_function = self.get_loss_function()
 
         train_losses = []
         val_losses = []
+        epoch_metrics = []
 
         if live_plot:
             plt.ion()
             fig, ax = plt.subplots()
+
+        best_state = None
+        best_val_total = float("inf")
+        epochs_without_improvement = 0
+        patience = TrainingConfig.EARLY_STOPPING_PATIENCE
+        min_delta = TrainingConfig.EARLY_STOPPING_MIN_DELTA
 
         for epoch in range(self.epochs):
             self.model.train()
@@ -256,14 +274,47 @@ class LSTMPINNModel:
 
             avg_loss = running_loss / total_batches
             train_losses.append(avg_loss)
+            val_total = None
+            val_data = None
+            val_physics = None
 
             if val_loader is not None:
-                val_loss = self._evaluate_on_loader(val_loader)
-                val_losses.append(val_loss)
-                print(f"Epoch [{epoch+1}/{self.epochs}], Total: {avg_loss:.6f}, Val: {val_loss:.6f}")
+                val_metrics = self._evaluate_on_loader(
+                    val_loader, feature_indices, data_processor
+                )
+                val_losses.append(val_metrics["total"])
+                val_total = val_metrics["total"]
+                val_data = val_metrics["data"]
+                val_physics = val_metrics["physics"]
+                print(
+                    f"Epoch [{epoch+1}/{self.epochs}], "
+                    f"Train Total: {avg_loss:.6f}, "
+                    f"Val Total: {val_metrics['total']:.6f}, "
+                    f"Val Data: {val_metrics['data']:.6f}, "
+                    f"Val Physics: {val_metrics['physics']:.6f}"
+                )
+
+                if val_total is not None and (best_val_total - val_total) > min_delta:
+                    best_val_total = val_total
+                    best_state = copy.deepcopy(self.model.state_dict())
+                    epochs_without_improvement = 0
+                    if checkpoint_path is not None:
+                        torch.save(best_state, checkpoint_path)
+                else:
+                    epochs_without_improvement += 1
             else:
                 val_losses.append(None)
                 print(f"Epoch [{epoch+1}/{self.epochs}], Total: {avg_loss:.6f}")
+
+            epoch_metrics.append(
+                {
+                    "epoch": epoch + 1,
+                    "train_total": avg_loss,
+                    "val_total": val_total,
+                    "val_data": val_data,
+                    "val_physics": val_physics,
+                }
+            )
 
             if live_plot:
                 ax.clear()
@@ -277,21 +328,53 @@ class LSTMPINNModel:
                 ax.legend()
                 plt.pause(0.01)
 
+            if val_loader is not None and epochs_without_improvement >= patience:
+                print(
+                    f"Early stopping at epoch {epoch+1}: "
+                    f"no Val Total improvement > {min_delta} for {patience} epochs."
+                )
+                break
+
         if live_plot:
             plt.ioff()
             plt.show()
             fig.savefig('training_validation_loss_plot_LSTM_PINN.png')
 
-    def _evaluate_on_loader(self, data_loader):
+        if best_state is not None:
+            self.model.load_state_dict(best_state)
+            print(f"Restored best model state (Val Total: {best_val_total:.6f})")
+
+        if metrics_output_path is not None and len(epoch_metrics) > 0:
+            pd.DataFrame(epoch_metrics).to_csv(metrics_output_path, index=False)
+            print(f"Saved validation metrics to {metrics_output_path}")
+
+    def _evaluate_on_loader(self, data_loader, feature_indices, data_processor):
         self.model.eval()
         loss_function = self.get_loss_function()
-        running_loss = 0.0
+        running_total = 0.0
+        running_data = 0.0
+        running_physics = 0.0
         with torch.no_grad():
-            for X_batch, _, y_batch in data_loader:
+            for X_batch, X_uns_batch, y_batch in data_loader:
                 outputs = self.model(X_batch)
-                loss = loss_function(outputs, y_batch)
-                running_loss += loss.item()
-        return running_loss / len(data_loader)
+                data_loss = loss_function(outputs, y_batch)
+
+                X_uns_last = X_uns_batch[:, -1, :]
+                physics_loss = self.calculate_physics_loss(
+                    X_uns_last, outputs, feature_indices, data_processor
+                )
+
+                total_loss = self.alpha * data_loss + self.beta * physics_loss
+                running_total += total_loss.item()
+                running_data += data_loss.item()
+                running_physics += physics_loss.item()
+
+        n_batches = len(data_loader)
+        return {
+            "total": running_total / n_batches,
+            "data": running_data / n_batches,
+            "physics": running_physics / n_batches,
+        }
 
     def evaluate(self, X_seq, y_seq, dataset_type="Test", data_processor=None):
         self.model.eval()
@@ -330,9 +413,16 @@ class LSTMPINNModel:
             self.train(train_loader, feature_indices, data_processor,
                        val_loader=val_loader, live_plot=False)
 
-            val_loss = self._evaluate_on_loader(val_loader)
-            fold_results.append(val_loss)
-            print(f"Fold {fold+1} Validation Loss: {val_loss:.8f}")
+            val_metrics = self._evaluate_on_loader(
+                val_loader, feature_indices, data_processor
+            )
+            fold_results.append(val_metrics["total"])
+            print(
+                f"Fold {fold+1} Validation -> "
+                f"Total: {val_metrics['total']:.8f}, "
+                f"Data: {val_metrics['data']:.8f}, "
+                f"Physics: {val_metrics['physics']:.8f}"
+            )
 
         avg = np.mean(fold_results)
         print(f"\nCross-validation Average Loss: {avg:.8f}")
@@ -343,6 +433,7 @@ class LSTMPINNModel:
             input_size=input_size,
             hidden_size=self.hidden_size,
             num_layers=self.num_layers,
+            dropout=self.dropout,
         ).to(self.device)
 
     @staticmethod
@@ -363,6 +454,9 @@ class LSTMPINNModel:
 
             model = LSTMPINNModel(
                 input_size=X_seq.shape[2],
+                hidden_size=ModelConfig.LSTM_HIDDEN_SIZE,
+                num_layers=ModelConfig.LSTM_NUM_LAYERS,
+                dropout=ModelConfig.LSTM_DROPOUT,
                 lr=lr,
                 epochs=TrainingConfig.EPOCHS_CV,
                 batch_size=batch_size,
@@ -370,6 +464,7 @@ class LSTMPINNModel:
                 loss_function_choice=TrainingConfig.LOSS_FUNCTION,
                 alpha=alpha,
                 beta=beta,
+                weight_decay=TrainingConfig.WEIGHT_DECAY,
             )
 
             avg_loss = model.cross_validate(
@@ -459,6 +554,9 @@ if __name__ == "__main__":
 
     final_model = LSTMPINNModel(
         input_size=X_train_seq.shape[2],
+        hidden_size=ModelConfig.LSTM_HIDDEN_SIZE,
+        num_layers=ModelConfig.LSTM_NUM_LAYERS,
+        dropout=ModelConfig.LSTM_DROPOUT,
         lr=best_params['lr'],
         epochs=TrainingConfig.EPOCHS_FINAL,
         batch_size=best_params['batch_size'],
@@ -466,6 +564,7 @@ if __name__ == "__main__":
         loss_function_choice=TrainingConfig.LOSS_FUNCTION,
         alpha=best_params['alpha'],
         beta=best_params['beta'],
+        weight_decay=TrainingConfig.WEIGHT_DECAY,
     )
 
     train_loader = final_model.prepare_sequence_dataloader(
@@ -476,6 +575,7 @@ if __name__ == "__main__":
     final_model.train(
         train_loader, feature_indices, data_processor,
         val_loader=val_loader, live_plot=True,
+        metrics_output_path="validation_metrics_LSTM_PINN.csv",
     )
 
     # --- Test evaluation ---

@@ -1,3 +1,4 @@
+import copy
 import torch
 import numpy as np
 import pandas as pd
@@ -80,12 +81,17 @@ class PGNNModel(BaseModel):
         return V, trim, H_s, theta_ship, theta_wave
 
     def train(self, train_loader, unscaled_data_loader, feature_indices, data_processor,
-              val_loader=None, live_plot=False):
+              val_loader=None, live_plot=False, checkpoint_path=None):
         optimizer = self.get_optimizer()
         loss_function = self.get_loss_function()
 
         train_losses = []
         val_losses = []
+        best_state = None
+        best_val_loss = float("inf")
+        epochs_without_improvement = 0
+        patience = TrainingConfig.EARLY_STOPPING_PATIENCE
+        min_delta = TrainingConfig.EARLY_STOPPING_MIN_DELTA
 
         if live_plot:
             plt.ion()
@@ -179,6 +185,15 @@ class PGNNModel(BaseModel):
                 val_losses.append(avg_val_loss)
                 print(f"Epoch [{epoch+1}/{self.epochs}], Total Loss: {avg_total_loss:.8f}, "
                       f"Validation Loss: {avg_val_loss:.8f}")
+
+                if (best_val_loss - avg_val_loss) > min_delta:
+                    best_val_loss = avg_val_loss
+                    best_state = copy.deepcopy(self.model.state_dict())
+                    epochs_without_improvement = 0
+                    if checkpoint_path is not None:
+                        torch.save(best_state, checkpoint_path)
+                else:
+                    epochs_without_improvement += 1
             else:
                 val_losses.append(None)
                 print(f"Epoch [{epoch+1}/{self.epochs}], Total Loss: {avg_total_loss:.8f}")
@@ -194,10 +209,21 @@ class PGNNModel(BaseModel):
                 ax.legend()
                 plt.pause(0.01)
 
+            if val_loader is not None and epochs_without_improvement >= patience:
+                print(
+                    f"Early stopping at epoch {epoch+1}: "
+                    f"no Validation improvement > {min_delta} for {patience} epochs."
+                )
+                break
+
         if live_plot:
             plt.ioff()
             plt.show()
             fig.savefig('training_validation_loss_plot_PGNN.png')
+
+        if best_state is not None:
+            self.model.load_state_dict(best_state)
+            print(f"Restored best model state (Validation Loss: {best_val_loss:.8f})")
 
     def cross_validate(self, X, X_unscaled, y, feature_indices, data_processor, k_folds=5):
         kfold = KFold(n_splits=k_folds, shuffle=True, random_state=DataConfig.RANDOM_STATE)
@@ -343,7 +369,7 @@ if __name__ == "__main__":
 
         final_model.train(
             final_train_loader, final_unscaled_loader, feature_indices, data_processor,
-            val_loader=final_val_loader, live_plot=True,
+            val_loader=final_val_loader, live_plot=True, checkpoint_path="best_model_PGNN.pt",
         )
 
         final_model.evaluate(X_test, y_test, dataset_type="Test", data_processor=data_processor)
