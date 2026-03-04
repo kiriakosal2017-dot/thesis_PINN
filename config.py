@@ -25,6 +25,7 @@ class DataConfig:
     FILE_PATH = _get_str('DATA_FILE_PATH', 'data/Aframax/P data_20200213-20200726_Democritos.csv')
     TARGET_COLUMN = _get_str('TARGET_COLUMN', 'Power')
     DROP_COLUMNS = _get_list('DROP_COLUMNS', 'TIME')
+    TIME_COLUMN = _get_str('TIME_COLUMN', 'TIME')
     MIN_POWER = _get_float('MIN_POWER', '1000')
     MIN_SPEED = _get_float('MIN_SPEED', '4')
     TEST_SIZE = _get_float('TEST_SIZE', '0.2')
@@ -54,6 +55,13 @@ class ShipConfig:
     NU = _get_float('KINEMATIC_VISCOSITY', '1e-6')
     G = _get_float('GRAVITY', '9.81')
     L_T = _get_float('TRANSOM_LENGTH', '20.0')
+    MASS = _get_float('SHIP_DISPLACEMENT', '115000000.0')
+    ADDED_MASS_COEFF = _get_float('ADDED_MASS_COEFF', '0.1')
+
+
+class SequenceConfig:
+    LENGTH = _get_int('SEQUENCE_LENGTH', '10')
+    MAX_TIME_GAP = _get_float('MAX_TIME_GAP_SECONDS', '3600')
 
 
 class TrainingConfig:
