@@ -4,8 +4,9 @@ data/
 .DS_Store
 .venv/
 venv/
-.env
 .idea/
 .vscode/
+best_hyperparameters_*.txt
+training_validation_loss_plot_*.png
 .cursor/
 .serena/
