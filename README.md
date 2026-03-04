@@ -2,121 +2,101 @@
 
 ## Introduction
 
-This project belongs to master's thesis of the Inter-Institutional MSc entitled "Artificial Intelligence" that is organized by The Department of Digital Systems, School of Informatics and Communication Technologies, of University of Piraeus, and the Institute of Informatics and Telecommunications of NCSR "Demokritos". url: "https://msc-ai.iit.demokritos.gr/en". Project explores the use of Physics-Guided Neural Networks (PGNNs) and Physics-Informed Neural Networks (PINNs) to predict ship propulsion power. By incorporating physical laws into the neural network training process, we aim to improve the model's predictive capabilities and assess whether PGNNs /PINNs offer advantages over purely data-driven models.
+This project explores the use of Physics-Guided Neural Networks (PGNNs) and Physics-Informed Neural Networks (PINNs) to predict ship propulsion power. By incorporating physical laws into the neural network training process, we aim to improve the model's predictive capabilities and assess whether PGNNs/PINNs offer advantages over purely data-driven models.
 
 ## Repository Structure
 
-- read_data.py: Reads and preprocesses the data, handling missing values, scaling features, and splitting the dataset into training and testing sets.
-- main_DATA.py: Implements a purely data-driven neural network model for predicting ship propulsion power. Includes hyperparameter tuning and model evaluation.
-- main_PGNN.py: Implements a Physics-Guided Neural Network (PGNN) that incorporates physical laws related to ship resistance into the training process.
-- main_PINN.py: Implements a Physics-Informed Neural Network (PINN) that incorporates PDEs related to ship resistance into the training process.
+```
+├── .env                # All configurable parameters (ship constants, paths, training defaults)
+├── config.py           # Loads .env into typed config classes
+├── base_model.py       # Shared NN architecture and training infrastructure
+├── read_data.py        # Data loading, preprocessing, and scaling
+├── main_DATA.py        # Data-driven neural network model
+├── main_PGNN.py        # Physics-Guided Neural Network (ship resistance loss)
+├── main_PINN.py        # Physics-Informed Neural Network (PDE residuals + boundary conditions)
+├── power_charts.py     # Physics validation: calculated vs. actual power plots
+├── requirements.txt    # Python dependencies
+└── data/               # Ship operational data (not tracked in git)
+```
 
 ## Features
 
-- Data Preprocessing: Handles missing values and scales features using StandardScaler.
-- Data-Driven Model: A multi-layer neural network trained solely on data to predict propulsion power.
-- Physics-Guided Neural Network: Enhances the data-driven model by adding a physics-based loss term derived from ship resistance equations.
-- Physics-Informed Neural Network: Enhances the data-driven model by adding a PDE loss term derived from ship resistance partial derivative equations.
-- Hyperparameter Tuning: Uses grid search and k-fold cross-validation to find optimal learning rates and batch sizes.
-- Model Evaluation: Provides training and validation loss during training and evaluates the final model on a test set.
+- **Data Preprocessing**: Handles missing values and scales features using StandardScaler.
+- **Data-Driven Model**: A multi-layer neural network trained solely on data to predict propulsion power.
+- **Physics-Guided Neural Network**: Enhances the data-driven model by adding a physics-based loss term derived from ship resistance equations.
+- **Physics-Informed Neural Network**: Enhances the data-driven model by adding a PDE loss term derived from ship resistance partial derivative equations.
+- **Hyperparameter Tuning**: Uses grid search and k-fold cross-validation to find optimal learning rates and batch sizes.
+- **Model Evaluation**: Provides training and validation loss during training and evaluates the final model on a test set.
+- **Centralized Configuration**: All ship constants, data paths, column names, and training defaults are configured via a `.env` file.
 
 ## Requirements
 
-The code has been created with the use of python version 3.12.2. In order to recreate the same working enviroment (and to ensure trouble-free code execusion) it is advised to run under virtual enviroment that should be created with the use of requirements.txt (attached).
+Python 3.12.2. It is advised to run under a virtual environment created with `requirements.txt` to ensure trouble-free execution.
 
 ## Installation
 
 1. Clone the repository:
 
-        git clone https://github.com/kiriakos2004/DL_Democritos_ptyx.git
+        git clone https://github.com/kiriakosal2017-dot/thesis_PINN.git
 
 2. Set up a virtual environment (optional but recommended):
 
-        python -m venv <name you want>
+        python -m venv venv
         source venv/bin/activate  # On Windows, use `venv\Scripts\activate`
 
-3. Install dependencies using:
+3. Install dependencies:
 
         pip install -r requirements.txt
 
+## Configuration
+
+All configurable parameters are in the `.env` file at the project root. Edit it to match your setup:
+
+- **Data paths**: `DATA_FILE_PATH`, `TARGET_COLUMN`, `DROP_COLUMNS`
+- **Data filtering**: `MIN_POWER`, `MIN_SPEED`
+- **Column names**: `SPEED_COLUMN`, `WAVE_HEIGHT_COLUMN`, `DRAFT_FORE_COLUMN`, etc.
+- **Ship constants**: `WATER_DENSITY`, `WETTED_SURFACE_AREA`, `SHIP_LENGTH`, etc.
+- **Training defaults**: `DEFAULT_EPOCHS_CV`, `DEFAULT_EPOCHS_FINAL`, `DEFAULT_OPTIMIZER`, etc.
 
 ## Data Preparation
 
-Ensure that you have the required CSV data files in the data/ directory. Update the file paths in the scripts if necessary.
-
-Update the file_path variable in the scripts if your data is located elsewhere.
+Ensure that you have the required CSV data files in the `data/` directory. The data path is configured in `.env` via the `DATA_FILE_PATH` variable.
 
 ## Usage
-### Data Preprocessing
 
-Before running the models, read and preprocess the data:
+### Data Preprocessing
 
         python read_data.py
 
-This will:
+This will load the dataset, handle missing values (fill with median), filter by power/speed thresholds, scale features, and split into training/testing sets.
 
-- Load the dataset.
-- Drop specified columns (e.g., TIME).
-- Handle missing values by filling them with the mean.
-- Split the data into features and target variable.
-- Scale the features using StandardScaler.
-- Split the data into training and testing sets.
+### Physics Validation
 
-### Check functions used for Physical Loss of PGNN
+        python power_charts.py
 
-In order to check if the equations used at the physical part of loss accurately predict power:
-        
-        power_charts.py
-        
- This script will:
-
-- Use unscaled data from data loader to Calculate the power needed.
-- Display in a common diagramm the calculated power and the power specified on the data in order to visualy compare the allingment.
+Plots calculated shaft power (from resistance equations) against actual power from the dataset for visual comparison.
 
 ### Running the Data-Driven Model
 
-To train and evaluate the purely data-driven neural network model:
-        
         python main_DATA.py
 
-This script will:
-
-- Load and preprocess the data using DataProcessor.
-- Perform hyperparameter tuning (learning rate and batch size) using k-fold cross-validation.
-- Train the final model with the best hyperparameters.
-- Evaluate the model on the test set in terms of RMSE.
-
-### Running the Physics-Informed Neural Network (PINN)
-
-To train and evaluate the PINN:
-
-        python main_PINN.py
-
-This script:
-
-- Loads and preprocesses the data.
-- Incorporates Physical Laws into the Model by defining the governing Partial Differential Equations (PDEs) related to fluid dynamics around the ship hull and computes PDE residuals using automatic differentiation to ensure the model adheres to the underlying physical principles.
-- Performs hyperparameter tuning similar to the data-driven model.
-- Trains the final PINN model with the best hyperparameters.
-- Evaluates the PINN on the test set in terms of RMSE.  
+Performs hyperparameter tuning (learning rate and batch size) using k-fold cross-validation, trains the final model with the best hyperparameters, and evaluates on the test set (RMSE).
 
 ### Running the Physics-Guided Neural Network (PGNN)
 
-To train and evaluate the PGNN:
-
         python main_PGNN.py
 
-This script:
+Incorporates ship resistance equations (frictional, wave-making, appendage, transom, correlation allowance, and added wave resistance) into the loss function. Tunes `alpha`, `beta`, and `k_wave` alongside learning rate and batch size.
 
-- Loads and preprocesses the data.
-- Incorporates physical laws related to ship resistance into the loss function.
-- Performs hyperparameter tuning similar to the data-driven model.
-- Trains the final PGNN model with the best hyperparameters.
-- Evaluates the PGNN on the test set in terms of RMSE.
+### Running the Physics-Informed Neural Network (PINN)
+
+        python main_PINN.py
+
+Incorporates PDE residuals using automatic differentiation and boundary conditions (P=0 when V=0) into the loss. Tunes `alpha`, `beta`, and `gamma` alongside learning rate and batch size.
 
 ## Formulation of a PDE for the Problem (PINN)
 
-Assuming we can model the resistance R as a function of speed V and other variables, we will consider a PDE like:
+Assuming we can model the resistance R as a function of speed V and other variables, we consider a PDE:
 
 ![image](https://github.com/user-attachments/assets/c72f77d4-7d20-4d31-920c-0dc76dcc7fec)
 
@@ -130,17 +110,17 @@ Where:
 The PGNN incorporates a physics-based loss term calculated using ship resistance equations:
 
 - Frictional Resistance
-  
+
 ![image](https://github.com/user-attachments/assets/7ff9b3d1-fb57-4cf5-a885-3f4148322d84)
 
 It is calculated using the ITTC-1957 formula, the frictional resistance coefficient accounts for the friction between the ship's hull and the water.
-  
+
 - Wave-Making Resistance
 
   ![image](https://github.com/user-attachments/assets/5dbf4b12-984d-4e44-8a36-ad1290fcdb90)
 
 Wave-making resistance is caused by the energy lost in generating waves as the ship moves through the water. It is influenced by the ship's speed and trim.
-  
+
 - Appendage Resistance
 
 ![image](https://github.com/user-attachments/assets/99d428c4-6b61-4697-9a93-ebfde8f9ca95)
@@ -163,7 +143,7 @@ This is an empirical correction factor to account for additional resistance not 
 
 ![image](https://github.com/user-attachments/assets/c84ba982-d45f-4eed-af88-1195b8d277b1)
 
-Where: 
+Where:
 
 ![image](https://github.com/user-attachments/assets/7ff1d96c-18eb-426d-8bfe-3e72edc4a105)
 
@@ -179,19 +159,19 @@ Finally the physics-based loss is computed as the squared difference between the
 
 ## Hyperparameter Tuning
 
-Both models perform hyperparameter tuning a predifined Hyperparameter Grid using k-fold cross-validation (default is 5 folds).
+All three models perform hyperparameter tuning over a predefined grid using k-fold cross-validation (default is 5 folds). Training defaults (epochs, optimizer, loss function) are configured in `.env`.
 
 ## Results
 
-- Training Loss: Displayed during each epoch for both models.
-- Validation Loss: Reported during hyperparameter tuning for each parameter combination.
-- Test Loss: Final evaluation metric on the test set.
+- **Training Loss**: Displayed during each epoch for all models.
+- **Validation Loss**: Reported during hyperparameter tuning for each parameter combination.
+- **Test Loss**: Final evaluation metric on the test set.
 
-Compare the test losses of both models to assess the impact of incorporating physics into the model.
+Compare the test losses of all three models to assess the impact of incorporating physics into the model.
 
 ## Acknowledgments
 
-- Special thanks to my profeccor Christoforos Rekatsinas (Ph.D.) for his guidance and support.
+- Special thanks to Christoforos Rekatsinas (Ph.D.) for his guidance and support.
 
 ## Contact
 
