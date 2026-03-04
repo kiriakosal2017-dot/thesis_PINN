@@ -110,9 +110,25 @@ class LSTMPINNModel:
         dataset = TensorDataset(X_t, X_uns_t, y_t)
         return DataLoader(dataset, batch_size=self.batch_size, shuffle=False, num_workers=0)
 
+    def _inverse_scale_power_torch(self, predicted_power_scaled, data_processor):
+        """Differentiable inverse StandardScaler transform, staying in torch.
+
+        StandardScaler: scaled = (x - mean) / std
+        Inverse:        x = scaled * std + mean
+        """
+        scaler = data_processor.scaler_y
+        y_mean = torch.tensor(scaler.mean_[0], dtype=predicted_power_scaled.dtype,
+                              device=predicted_power_scaled.device)
+        y_std = torch.tensor(scaler.scale_[0], dtype=predicted_power_scaled.dtype,
+                             device=predicted_power_scaled.device)
+        return predicted_power_scaled * y_std + y_mean
+
     def calculate_physics_loss(self, X_unscaled_last, predicted_power_scaled,
                                feature_indices, data_processor):
         """Compute surge equation residual at the last time step.
+
+        Fully differentiable: gradients flow from physics residual
+        back through predicted_power_scaled to model weights.
 
         Newton's law: (M * (1 + k_added)) * a = T_prop - R_total
         Where T_prop = P_pred * eta_D / V
@@ -163,25 +179,24 @@ class LSTMPINNModel:
             R_AW = 0.5 * ship.RHO * V**2 * ship.S * k_wave * H_s**2 * (1 + torch.cos(theta_rel_rad))
             R_total = R_total + R_AW
 
-        # --- Inverse-transform predicted power to real scale (kW) ---
-        P_pred_np = predicted_power_scaled.detach().cpu().numpy()
-        P_pred_kW = data_processor.inverse_transform_y(P_pred_np)
-        P_pred_real = torch.tensor(P_pred_kW, dtype=V.dtype, device=V.device)
-        P_pred_W = P_pred_real * 1000.0  # kW -> W
+        # --- Differentiable inverse scaling (no detach/numpy) ---
+        P_pred_kW = self._inverse_scale_power_torch(predicted_power_scaled, data_processor)
+        P_pred_W = P_pred_kW * 1000.0  # kW -> W
 
-        # T_prop = P * eta_D / V
-        T_prop = (P_pred_W * ship.ETA_D) / V
+        # T_prop = P * eta_D / V  (epsilon-safe division already via V clamping)
+        T_prop = (P_pred_W.squeeze() * ship.ETA_D) / V
 
         # LHS: (M + m_added) * acceleration
         LHS = M_eff * accel
 
         # RHS: T_prop - R_total
-        RHS = T_prop.squeeze() - R_total
+        RHS = T_prop - R_total
 
         physics_residual = LHS - RHS
         physics_loss = torch.mean(physics_residual ** 2)
 
-        # Normalize by scale of forces to keep loss balanced
+        # Normalize by scale of forces (detach R_total here is correct:
+        # R_total depends only on input data, not on model parameters)
         force_scale = torch.mean(R_total.detach() ** 2) + 1e-8
         physics_loss_normalized = physics_loss / force_scale
 
