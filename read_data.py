@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+from pathlib import Path
 from config import DataConfig, ColumnConfig, SequenceConfig
 
 
@@ -27,9 +28,23 @@ class DataProcessor:
         self.scaler_y = StandardScaler()
         self.df = None
 
+    def _read_input_file(self):
+        file_path = Path(self.file_path)
+        suffix = file_path.suffix.lower()
+        if suffix in [".xlsx", ".xls"]:
+            return pd.read_excel(self.file_path)
+        return pd.read_csv(self.file_path)
+
+    def _drop_all_nan_numeric_columns(self):
+        numeric_cols = self.df.select_dtypes(include=['float64', 'int64']).columns
+        all_nan_numeric = [col for col in numeric_cols if self.df[col].isna().all()]
+        if all_nan_numeric:
+            self.df.drop(columns=all_nan_numeric, inplace=True)
+            print(f"Dropped all-NaN numeric columns: {all_nan_numeric}")
+
     def load_and_prepare_data(self):
         try:
-            self.df = pd.read_csv(self.file_path)
+            self.df = self._read_input_file()
         except FileNotFoundError:
             print(f"File not found: {self.file_path}")
             return None
@@ -64,6 +79,8 @@ class DataProcessor:
         if speed_col in self.df.columns:
             self.df = self.df[self.df[speed_col] >= DataConfig.MIN_SPEED]
 
+        numeric_cols = self.df.select_dtypes(include=['float64', 'int64']).columns
+        self._drop_all_nan_numeric_columns()
         numeric_cols = self.df.select_dtypes(include=['float64', 'int64']).columns
         if self.fill_missing_with_median:
             self.df[numeric_cols] = self.df[numeric_cols].fillna(self.df[numeric_cols].median())
@@ -117,7 +134,7 @@ class DataProcessor:
     def list_column_names(self):
         if self.df is None:
             try:
-                self.df = pd.read_csv(self.file_path)
+                self.df = self._read_input_file()
                 if self.drop_columns is not None:
                     self.df.drop(columns=self.drop_columns, inplace=True, errors='ignore')
             except FileNotFoundError:
@@ -144,7 +161,7 @@ class DataProcessor:
             accel_train, accel_test : arrays of dV/dt (m/s^2)
         """
         try:
-            self.df = pd.read_csv(self.file_path)
+            self.df = self._read_input_file()
         except FileNotFoundError:
             print(f"File not found: {self.file_path}")
             return None
@@ -185,6 +202,8 @@ class DataProcessor:
         if speed_col in self.df.columns:
             self.df = self.df[self.df[speed_col] >= DataConfig.MIN_SPEED]
 
+        numeric_cols = self.df.select_dtypes(include=['float64', 'int64']).columns
+        self._drop_all_nan_numeric_columns()
         numeric_cols = self.df.select_dtypes(include=['float64', 'int64']).columns
         if self.fill_missing_with_median:
             self.df[numeric_cols] = self.df[numeric_cols].fillna(self.df[numeric_cols].median())

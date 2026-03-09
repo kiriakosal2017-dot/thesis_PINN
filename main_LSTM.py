@@ -68,7 +68,25 @@ class LSTMPINNModel:
             hidden_size=hidden_size,
             num_layers=num_layers,
             dropout=dropout,
-        ).to(self.device)
+        )
+        self._move_model_to_device_with_fallback()
+
+    def _move_model_to_device_with_fallback(self):
+        """Move model to selected device, fallback to CPU on MPS OOM."""
+        try:
+            self.model = self.model.to(self.device)
+        except RuntimeError as exc:
+            msg = str(exc).lower()
+            if self.device.type == "mps" and "out of memory" in msg:
+                print("MPS OOM while moving model to device. Falling back to CPU for this trial.")
+                try:
+                    torch.mps.empty_cache()
+                except Exception:
+                    pass
+                self.device = torch.device("cpu")
+                self.model = self.model.to(self.device)
+            else:
+                raise
 
     @staticmethod
     def _get_device():
@@ -113,9 +131,10 @@ class LSTMPINNModel:
             X_unscaled_seq: (N, seq_len, features) unscaled
             y_seq: (N,) scaled targets
         """
-        X_t = torch.tensor(X_seq, dtype=torch.float32).to(self.device)
-        X_uns_t = torch.tensor(X_unscaled_seq, dtype=torch.float32).to(self.device)
-        y_t = torch.tensor(y_seq, dtype=torch.float32).view(-1, 1).to(self.device)
+        # Keep full datasets on CPU; move only mini-batches to device in train/eval loops.
+        X_t = torch.tensor(X_seq, dtype=torch.float32)
+        X_uns_t = torch.tensor(X_unscaled_seq, dtype=torch.float32)
+        y_t = torch.tensor(y_seq, dtype=torch.float32).view(-1, 1)
 
         dataset = TensorDataset(X_t, X_uns_t, y_t)
         return DataLoader(dataset, batch_size=self.batch_size, shuffle=False, num_workers=0)
@@ -248,6 +267,9 @@ class LSTMPINNModel:
 
             for batch_idx, (X_batch, X_uns_batch, y_batch) in progress_bar:
                 optimizer.zero_grad()
+                X_batch = X_batch.to(self.device)
+                X_uns_batch = X_uns_batch.to(self.device)
+                y_batch = y_batch.to(self.device)
 
                 outputs = self.model(X_batch)
                 data_loss = loss_function(outputs, y_batch)
@@ -356,6 +378,9 @@ class LSTMPINNModel:
         running_physics = 0.0
         with torch.no_grad():
             for X_batch, X_uns_batch, y_batch in data_loader:
+                X_batch = X_batch.to(self.device)
+                X_uns_batch = X_uns_batch.to(self.device)
+                y_batch = y_batch.to(self.device)
                 outputs = self.model(X_batch)
                 data_loss = loss_function(outputs, y_batch)
 
@@ -378,22 +403,43 @@ class LSTMPINNModel:
 
     def evaluate(self, X_seq, y_seq, dataset_type="Test", data_processor=None):
         self.model.eval()
-        X_t = torch.tensor(X_seq, dtype=torch.float32).to(self.device)
-        y_t = torch.tensor(y_seq, dtype=torch.float32).view(-1, 1).to(self.device)
-
         loss_function = self.get_loss_function()
+        X_t = torch.tensor(X_seq, dtype=torch.float32)
+        y_t = torch.tensor(y_seq, dtype=torch.float32).view(-1, 1)
+        eval_loader = DataLoader(
+            TensorDataset(X_t, y_t),
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=0,
+        )
+
+        running_loss = 0.0
+        n_batches = 0
+        outputs_all = []
+        y_all = []
         with torch.no_grad():
-            outputs = self.model(X_t)
-            loss = loss_function(outputs, y_t)
-            print(f"\n{dataset_type} Loss: {loss.item():.8f}")
+            for X_batch, y_batch in eval_loader:
+                X_batch = X_batch.to(self.device)
+                y_batch = y_batch.to(self.device)
+                outputs = self.model(X_batch)
+                loss = loss_function(outputs, y_batch)
+                running_loss += loss.item()
+                n_batches += 1
+                outputs_all.append(outputs.cpu())
+                y_all.append(y_batch.cpu())
 
-            if data_processor:
-                outputs_orig = data_processor.inverse_transform_y(outputs.cpu().numpy())
-                y_orig = data_processor.inverse_transform_y(y_t.cpu().numpy())
-                rmse = np.sqrt(np.mean((outputs_orig - y_orig) ** 2))
-                print(f"{dataset_type} RMSE: {rmse:.4f}")
+        mean_loss = running_loss / max(n_batches, 1)
+        print(f"\n{dataset_type} Loss: {mean_loss:.8f}")
 
-        return loss.item()
+        if data_processor and outputs_all:
+            outputs_np = torch.cat(outputs_all, dim=0).numpy()
+            y_np = torch.cat(y_all, dim=0).numpy()
+            outputs_orig = data_processor.inverse_transform_y(outputs_np)
+            y_orig = data_processor.inverse_transform_y(y_np)
+            rmse = np.sqrt(np.mean((outputs_orig - y_orig) ** 2))
+            print(f"{dataset_type} RMSE: {rmse:.4f}")
+
+        return mean_loss
 
     def cross_validate(self, X_seq, X_uns_seq, y_seq, feature_indices,
                        data_processor, k_folds=5):
@@ -434,7 +480,8 @@ class LSTMPINNModel:
             hidden_size=self.hidden_size,
             num_layers=self.num_layers,
             dropout=self.dropout,
-        ).to(self.device)
+        )
+        self._move_model_to_device_with_fallback()
 
     @staticmethod
     def hyperparameter_search(X_seq, X_uns_seq, y_seq, feature_indices,

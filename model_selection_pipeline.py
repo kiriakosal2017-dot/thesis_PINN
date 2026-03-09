@@ -2,6 +2,8 @@ import argparse
 import json
 import time
 import traceback
+import gc
+import torch
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from itertools import product
@@ -29,7 +31,32 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def build_trials(model_types: List[str]) -> List[Trial]:
+def _parse_int_list(raw: str) -> List[int]:
+    return [int(x.strip()) for x in raw.split(",") if x.strip()]
+
+
+def _parse_float_list(raw: str) -> List[float]:
+    return [float(x.strip()) for x in raw.split(",") if x.strip()]
+
+
+def _load_trials_from_results_csv(csv_path: Path, top_k: int = None, only_ok: bool = True) -> List[Trial]:
+    df = pd.read_csv(csv_path)
+    if only_ok and "status" in df.columns:
+        df = df[df["status"] == "ok"]
+    if "val_loss" in df.columns:
+        df = df.sort_values("val_loss", ascending=True)
+    if top_k is not None and top_k > 0:
+        df = df.head(top_k)
+
+    trials: List[Trial] = []
+    for _, row in df.iterrows():
+        params = json.loads(row["params_json"]) if isinstance(row.get("params_json"), str) else {}
+        model_type = row.get("model_type", "LSTM_PINN")
+        trials.append(Trial(model_type=model_type, params=params))
+    return trials
+
+
+def build_trials(model_types: List[str], lstm_grid: Dict = None) -> List[Trial]:
     trials: List[Trial] = []
 
     if "DATA" in model_types:
@@ -97,7 +124,7 @@ def build_trials(model_types: List[str]) -> List[Trial]:
             )
 
     if "LSTM_PINN" in model_types:
-        lstm_grid = {
+        effective_lstm_grid = {
             "hidden_size": [64, 128, 256],
             "num_layers": [1, 2],
             "dropout": [0.2, 0.3],
@@ -106,14 +133,19 @@ def build_trials(model_types: List[str]) -> List[Trial]:
             "alpha": [1.0],
             "beta": [0.05, 0.1],
         }
+        if lstm_grid is not None:
+            for key, value in lstm_grid.items():
+                if value:
+                    effective_lstm_grid[key] = value
+
         for hidden_size, num_layers, dropout, lr, batch_size, alpha, beta in product(
-            lstm_grid["hidden_size"],
-            lstm_grid["num_layers"],
-            lstm_grid["dropout"],
-            lstm_grid["lr"],
-            lstm_grid["batch_size"],
-            lstm_grid["alpha"],
-            lstm_grid["beta"],
+            effective_lstm_grid["hidden_size"],
+            effective_lstm_grid["num_layers"],
+            effective_lstm_grid["dropout"],
+            effective_lstm_grid["lr"],
+            effective_lstm_grid["batch_size"],
+            effective_lstm_grid["alpha"],
+            effective_lstm_grid["beta"],
         ):
             trials.append(
                 Trial(
@@ -399,30 +431,25 @@ def _write_summary(results_df: pd.DataFrame, summary_path: Path, epochs: int):
     summary_path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def run_pipeline(epochs: int, max_trials: int, output_dir: Path, model_types: List[str]):
+def _run_trial_list(
+    trials: List[Trial],
+    epochs: int,
+    output_dir: Path,
+    model_types: List[str],
+    csv_filename: str,
+    txt_filename: str,
+    stage_label: str,
+    tabular_data: Dict,
+    temporal_data: Dict,
+) -> pd.DataFrame:
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoints_dir = output_dir / "checkpoints"
     metrics_dir = output_dir / "trial_metrics"
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
     metrics_dir.mkdir(parents=True, exist_ok=True)
 
-    csv_path = output_dir / "model_selection_trials.csv"
-    txt_path = output_dir / "model_selection_summary.txt"
-
-    trials = build_trials(model_types=model_types)
-    if max_trials > 0:
-        trials = trials[:max_trials]
-
-    print(f"Total trials to run: {len(trials)}")
-    print(f"Epochs per trial: {epochs}")
-    print(f"Output directory: {output_dir}")
-
-    tabular_data = None
-    temporal_data = None
-    if any(mt in model_types for mt in ["DATA", "PGNN", "PINN"]):
-        tabular_data = _prepare_tabular_data()
-    if "LSTM_PINN" in model_types:
-        temporal_data = _prepare_lstm_data()
+    csv_path = output_dir / csv_filename
+    txt_path = output_dir / txt_filename
 
     rows = []
     for idx, trial in enumerate(trials, start=1):
@@ -430,10 +457,13 @@ def run_pipeline(epochs: int, max_trials: int, output_dir: Path, model_types: Li
         t0 = time.time()
         params_json = json.dumps(trial.params, sort_keys=True)
         model_size = _model_size_label(trial)
-        ckpt_path = checkpoints_dir / f"trial_{idx:04d}_{trial.model_type}.pt"
-        trial_metrics_path = metrics_dir / f"trial_{idx:04d}_{trial.model_type}.csv"
+        ckpt_path = checkpoints_dir / f"{stage_label}_trial_{idx:04d}_{trial.model_type}.pt"
+        trial_metrics_path = metrics_dir / f"{stage_label}_trial_{idx:04d}_{trial.model_type}.csv"
 
-        print(f"\n[{idx}/{len(trials)}] Running {trial.model_type} | size={model_size} | params={params_json}")
+        print(
+            f"\n[{idx}/{len(trials)}] Running {trial.model_type} | "
+            f"size={model_size} | params={params_json}"
+        )
 
         status = "ok"
         error_message = ""
@@ -457,10 +487,20 @@ def run_pipeline(epochs: int, max_trials: int, output_dir: Path, model_types: Li
             error_message = f"{exc.__class__.__name__}: {exc}"
             print(f"Trial failed: {error_message}")
             print(traceback.format_exc())
+        finally:
+            # Force cleanup to prevent MPS Out-Of-Memory on Apple Silicon
+            if "model" in locals():
+                del model
+            gc.collect()
+            if torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+            elif torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         duration_sec = time.time() - t0
         row = {
             "trial_id": idx,
+            "stage": stage_label,
             "started_at": started_at,
             "ended_at": _now_iso(),
             "duration_sec": round(duration_sec, 3),
@@ -474,12 +514,243 @@ def run_pipeline(epochs: int, max_trials: int, output_dir: Path, model_types: Li
         }
         rows.append(row)
 
-        pd.DataFrame(rows).to_csv(csv_path, index=False)
-        _write_summary(pd.DataFrame(rows), txt_path, epochs)
+        stage_df = pd.DataFrame(rows)
+        stage_df.to_csv(csv_path, index=False)
+        _write_summary(stage_df, txt_path, epochs)
 
-    print("\nPipeline completed.")
-    print(f"Trials CSV: {csv_path}")
-    print(f"Summary TXT: {txt_path}")
+    return pd.DataFrame(rows)
+
+
+def run_pipeline(
+    epochs: int,
+    max_trials: int,
+    output_dir: Path,
+    model_types: List[str],
+    two_stage: bool = False,
+    three_stage: bool = False,
+    stage1_epochs: int = None,
+    stage2_epochs: int = 100,
+    stage2_top_k: int = 10,
+    stage3_epochs: int = 250,
+    stage3_top_k: int = 3,
+    lstm_grid: Dict = None,
+    resume_stage1_csv: Path = None,
+    resume_stage2_csv: Path = None,
+    retry_failed_stage1_csv: Path = None,
+):
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    trials = build_trials(model_types=model_types, lstm_grid=lstm_grid)
+    if max_trials > 0:
+        trials = trials[:max_trials]
+
+    if resume_stage1_csv is not None or resume_stage2_csv is not None or retry_failed_stage1_csv is not None:
+        print("Resume mode: ON")
+        if resume_stage1_csv is not None:
+            print(f"Using cached stage1 results from: {resume_stage1_csv}")
+        if resume_stage2_csv is not None:
+            print(f"Using cached stage2 results from: {resume_stage2_csv}")
+        if retry_failed_stage1_csv is not None:
+            print(f"Retrying failed stage1 trials from: {retry_failed_stage1_csv}")
+    else:
+        print(f"Total trials to run: {len(trials)}")
+    if three_stage:
+        two_stage = True
+
+    if two_stage:
+        effective_stage1 = stage1_epochs if stage1_epochs is not None else epochs
+        if three_stage:
+            print(
+                "Three-stage mode: ON | "
+                f"stage1_epochs={effective_stage1}, "
+                f"stage2_epochs={stage2_epochs}, stage2_top_k={stage2_top_k}, "
+                f"stage3_epochs={stage3_epochs}, stage3_top_k={stage3_top_k}"
+            )
+        else:
+            print(f"Two-stage mode: ON | stage1_epochs={effective_stage1}, stage2_epochs={stage2_epochs}, top_k={stage2_top_k}")
+    else:
+        print(f"Epochs per trial: {epochs}")
+    print(f"Output directory: {output_dir}")
+
+    tabular_data = None
+    temporal_data = None
+    if any(mt in model_types for mt in ["DATA", "PGNN", "PINN"]):
+        tabular_data = _prepare_tabular_data()
+    if "LSTM_PINN" in model_types:
+        temporal_data = _prepare_lstm_data()
+
+    if not two_stage:
+        stage_df = _run_trial_list(
+            trials=trials,
+            epochs=epochs,
+            output_dir=output_dir,
+            model_types=model_types,
+            csv_filename="model_selection_trials.csv",
+            txt_filename="model_selection_summary.txt",
+            stage_label="single_stage",
+            tabular_data=tabular_data,
+            temporal_data=temporal_data,
+        )
+        print("\nPipeline completed.")
+        print(f"Trials CSV: {output_dir / 'model_selection_trials.csv'}")
+        print(f"Summary TXT: {output_dir / 'model_selection_summary.txt'}")
+        return stage_df
+
+    # Two-stage / Three-stage mode
+    effective_stage1 = stage1_epochs if stage1_epochs is not None else epochs
+    stage1_df = None
+    stage2_trials: List[Trial] = []
+
+    if resume_stage2_csv is not None:
+        stage2_trials = _load_trials_from_results_csv(resume_stage2_csv, top_k=stage2_top_k, only_ok=False)
+        print(f"\nStage2 resume from cached stage2 CSV with {len(stage2_trials)} trials.")
+    elif retry_failed_stage1_csv is not None:
+        cached_stage1_df = pd.read_csv(retry_failed_stage1_csv)
+        if "status" in cached_stage1_df.columns:
+            cached_ok_df = cached_stage1_df[cached_stage1_df["status"] == "ok"].copy()
+            failed_df = cached_stage1_df[cached_stage1_df["status"] != "ok"].copy()
+        else:
+            cached_ok_df = cached_stage1_df.copy()
+            failed_df = pd.DataFrame(columns=cached_stage1_df.columns)
+
+        retry_trials: List[Trial] = []
+        for _, row in failed_df.iterrows():
+            params = json.loads(row["params_json"]) if isinstance(row.get("params_json"), str) else {}
+            model_type = row.get("model_type", "LSTM_PINN")
+            retry_trials.append(Trial(model_type=model_type, params=params))
+
+        print(
+            f"\nStage1 retry mode: cached_ok={len(cached_ok_df)}, "
+            f"failed_to_retry={len(retry_trials)}"
+        )
+        if retry_trials:
+            stage1_retry_df = _run_trial_list(
+                trials=retry_trials,
+                epochs=effective_stage1,
+                output_dir=output_dir,
+                model_types=model_types,
+                csv_filename="stage1_retry_trials.csv",
+                txt_filename="stage1_retry_summary.txt",
+                stage_label="stage1_retry",
+                tabular_data=tabular_data,
+                temporal_data=temporal_data,
+            )
+            stage1_df = pd.concat([cached_ok_df, stage1_retry_df], ignore_index=True)
+        else:
+            stage1_df = cached_ok_df
+
+        stage1_df.to_csv(output_dir / "stage1_trials.csv", index=False)
+        _write_summary(stage1_df, output_dir / "stage1_summary.txt", effective_stage1)
+        ok_stage1 = stage1_df[stage1_df["status"] == "ok"].copy().sort_values("val_loss", ascending=True)
+        top_k = min(stage2_top_k, len(ok_stage1))
+        stage2_trials = [
+            Trial(
+                model_type=row["model_type"],
+                params=json.loads(row["params_json"]) if isinstance(row.get("params_json"), str) else {},
+            )
+            for _, row in ok_stage1.head(top_k).iterrows()
+        ]
+        print(f"Stage2 selection after retry: top-{len(stage2_trials)} trials.")
+    elif resume_stage1_csv is not None:
+        stage2_trials = _load_trials_from_results_csv(resume_stage1_csv, top_k=stage2_top_k, only_ok=True)
+        print(f"\nStage2 resume from cached stage1 CSV with top-{len(stage2_trials)} trials.")
+    else:
+        stage1_df = _run_trial_list(
+            trials=trials,
+            epochs=effective_stage1,
+            output_dir=output_dir,
+            model_types=model_types,
+            csv_filename="stage1_trials.csv",
+            txt_filename="stage1_summary.txt",
+            stage_label="stage1",
+            tabular_data=tabular_data,
+            temporal_data=temporal_data,
+        )
+
+        ok_stage1 = stage1_df[stage1_df["status"] == "ok"].copy().sort_values("val_loss", ascending=True)
+        if ok_stage1.empty:
+            print("\nStage1 produced no successful trials; skipping stage2.")
+            stage1_df.to_csv(output_dir / "model_selection_trials.csv", index=False)
+            _write_summary(stage1_df, output_dir / "model_selection_summary.txt", effective_stage1)
+            return stage1_df
+
+        top_k = min(stage2_top_k, len(ok_stage1))
+        stage2_trials = [
+            Trial(
+                model_type=row["model_type"],
+                params=json.loads(row["params_json"]) if isinstance(row.get("params_json"), str) else {},
+            )
+            for _, row in ok_stage1.head(top_k).iterrows()
+        ]
+
+    if not stage2_trials:
+        print("\nNo stage2 trials available (resume source empty).")
+        return pd.DataFrame()
+
+    print(f"\nStage2 refinement on {len(stage2_trials)} trials.")
+    stage2_df = _run_trial_list(
+        trials=stage2_trials,
+        epochs=stage2_epochs,
+        output_dir=output_dir,
+        model_types=model_types,
+        csv_filename="stage2_trials.csv",
+        txt_filename="stage2_summary.txt",
+        stage_label="stage2",
+        tabular_data=tabular_data,
+        temporal_data=temporal_data,
+    )
+
+    if not three_stage:
+        frames = [df for df in [stage1_df, stage2_df] if df is not None and len(df) > 0]
+        combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        combined.to_csv(output_dir / "model_selection_trials.csv", index=False)
+        _write_summary(stage2_df, output_dir / "model_selection_summary.txt", stage2_epochs)
+
+        print("\nTwo-stage pipeline completed.")
+        print(f"Stage1 CSV/TXT: {output_dir / 'stage1_trials.csv'}, {output_dir / 'stage1_summary.txt'}")
+        print(f"Stage2 CSV/TXT: {output_dir / 'stage2_trials.csv'}, {output_dir / 'stage2_summary.txt'}")
+        print(f"Combined CSV: {output_dir / 'model_selection_trials.csv'}")
+        print(f"Final summary TXT: {output_dir / 'model_selection_summary.txt'}")
+        return combined
+
+    ok_stage2 = stage2_df[stage2_df["status"] == "ok"].copy().sort_values("val_loss", ascending=True)
+    if ok_stage2.empty:
+        print("\nStage2 produced no successful trials; skipping stage3.")
+        frames = [df for df in [stage1_df, stage2_df] if df is not None and len(df) > 0]
+        combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        combined.to_csv(output_dir / "model_selection_trials.csv", index=False)
+        _write_summary(stage2_df, output_dir / "model_selection_summary.txt", stage2_epochs)
+        return combined
+
+    top_k3 = min(stage3_top_k, len(ok_stage2))
+    top_stage2_ids = ok_stage2.head(top_k3)["trial_id"].tolist()
+    stage3_trials = [stage2_trials[trial_id - 1] for trial_id in top_stage2_ids]
+
+    print(f"\nStage3 confirmation on top-{top_k3} trials from stage2.")
+    stage3_df = _run_trial_list(
+        trials=stage3_trials,
+        epochs=stage3_epochs,
+        output_dir=output_dir,
+        model_types=model_types,
+        csv_filename="stage3_trials.csv",
+        txt_filename="stage3_summary.txt",
+        stage_label="stage3",
+        tabular_data=tabular_data,
+        temporal_data=temporal_data,
+    )
+
+    frames = [df for df in [stage1_df, stage2_df, stage3_df] if df is not None and len(df) > 0]
+    combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    combined.to_csv(output_dir / "model_selection_trials.csv", index=False)
+    _write_summary(stage3_df, output_dir / "model_selection_summary.txt", stage3_epochs)
+
+    print("\nThree-stage pipeline completed.")
+    print(f"Stage1 CSV/TXT: {output_dir / 'stage1_trials.csv'}, {output_dir / 'stage1_summary.txt'}")
+    print(f"Stage2 CSV/TXT: {output_dir / 'stage2_trials.csv'}, {output_dir / 'stage2_summary.txt'}")
+    print(f"Stage3 CSV/TXT: {output_dir / 'stage3_trials.csv'}, {output_dir / 'stage3_summary.txt'}")
+    print(f"Combined CSV: {output_dir / 'model_selection_trials.csv'}")
+    print(f"Final summary TXT: {output_dir / 'model_selection_summary.txt'}")
+    return combined
 
 
 def parse_args():
@@ -510,6 +781,100 @@ def parse_args():
         default="DATA,PGNN,PINN,LSTM_PINN",
         help="Comma-separated list of models to evaluate: DATA,PGNN,PINN,LSTM_PINN",
     )
+    parser.add_argument(
+        "--two-stage",
+        action="store_true",
+        help="Enable two-stage selection: coarse sweep then top-k refinement.",
+    )
+    parser.add_argument(
+        "--three-stage",
+        action="store_true",
+        help="Enable three-stage selection: coarse sweep, refine top-k, then confirm top-k.",
+    )
+    parser.add_argument(
+        "--stage1-epochs",
+        type=int,
+        default=None,
+        help="Epochs for stage1 (defaults to --epochs).",
+    )
+    parser.add_argument(
+        "--stage2-epochs",
+        type=int,
+        default=100,
+        help="Epochs for stage2 top-k refinement.",
+    )
+    parser.add_argument(
+        "--stage2-top-k",
+        type=int,
+        default=10,
+        help="How many top stage1 trials to re-run in stage2.",
+    )
+    parser.add_argument(
+        "--stage3-epochs",
+        type=int,
+        default=250,
+        help="Epochs for stage3 top-k confirmation.",
+    )
+    parser.add_argument(
+        "--stage3-top-k",
+        type=int,
+        default=3,
+        help="How many top stage2 trials to re-run in stage3.",
+    )
+    parser.add_argument(
+        "--resume-stage1-csv",
+        type=str,
+        default=None,
+        help="Path to an existing stage1_trials.csv to skip stage1 and run stage2/stage3 directly.",
+    )
+    parser.add_argument(
+        "--resume-stage2-csv",
+        type=str,
+        default=None,
+        help="Path to an existing stage2_trials.csv to rerun stage2/stage3 directly.",
+    )
+    parser.add_argument(
+        "--retry-failed-stage1-csv",
+        type=str,
+        default=None,
+        help="Path to an existing stage1_trials.csv; rerun only failed stage1 trials, then continue with stage2/stage3.",
+    )
+    parser.add_argument(
+        "--lstm-hidden-sizes",
+        type=str,
+        default="64,128,256",
+        help="Comma-separated hidden sizes for LSTM grid.",
+    )
+    parser.add_argument(
+        "--lstm-num-layers",
+        type=str,
+        default="1,2",
+        help="Comma-separated number of LSTM layers for grid.",
+    )
+    parser.add_argument(
+        "--lstm-dropouts",
+        type=str,
+        default="0.2,0.3",
+        help="Comma-separated LSTM dropout values for grid.",
+    )
+    parser.add_argument(
+        "--lstm-lrs",
+        type=str,
+        default="0.001,0.0005",
+        help="Comma-separated learning rates for LSTM grid.",
+    )
+    parser.add_argument(
+        "--lstm-batch-sizes",
+        type=str,
+        default="64,128",
+        help="Comma-separated batch sizes for LSTM grid.",
+    )
+    parser.add_argument(
+        "--lstm-betas",
+        type=str,
+        default="0.05,0.1",
+        help="Comma-separated physics-loss beta values for LSTM grid.",
+    )
     return parser.parse_args()
 
 
@@ -521,9 +886,30 @@ if __name__ == "__main__":
     if invalid:
         raise ValueError(f"Unknown model type(s): {invalid}. Allowed: {sorted(allowed)}")
 
+    lstm_grid = {
+        "hidden_size": _parse_int_list(args.lstm_hidden_sizes),
+        "num_layers": _parse_int_list(args.lstm_num_layers),
+        "dropout": _parse_float_list(args.lstm_dropouts),
+        "lr": _parse_float_list(args.lstm_lrs),
+        "batch_size": _parse_int_list(args.lstm_batch_sizes),
+        "alpha": [1.0],
+        "beta": _parse_float_list(args.lstm_betas),
+    }
+
     run_pipeline(
         epochs=args.epochs,
         max_trials=args.max_trials,
         output_dir=Path(args.output_dir),
         model_types=model_types,
+        two_stage=args.two_stage,
+        three_stage=args.three_stage,
+        stage1_epochs=args.stage1_epochs,
+        stage2_epochs=args.stage2_epochs,
+        stage2_top_k=args.stage2_top_k,
+        stage3_epochs=args.stage3_epochs,
+        stage3_top_k=args.stage3_top_k,
+        lstm_grid=lstm_grid,
+        resume_stage1_csv=Path(args.resume_stage1_csv) if args.resume_stage1_csv else None,
+        resume_stage2_csv=Path(args.resume_stage2_csv) if args.resume_stage2_csv else None,
+        retry_failed_stage1_csv=Path(args.retry_failed_stage1_csv) if args.retry_failed_stage1_csv else None,
     )
