@@ -16,39 +16,44 @@ def initialize_weights(model):
 
 
 class ShipSpeedPredictor(nn.Module):
-    """Shared 5-layer MLP architecture used by all model variants."""
+    """Shared configurable MLP architecture used by tabular model variants."""
 
-    def __init__(self, input_size):
+    def __init__(self, input_size, hidden_layers=None):
         super().__init__()
-        self.fc1 = nn.Linear(input_size, 128)
-        self.fc2 = nn.Linear(128, 64)
-        self.fc3 = nn.Linear(64, 32)
-        self.fc4 = nn.Linear(32, 16)
-        self.fc5 = nn.Linear(16, 1)
+        hidden_layers = hidden_layers or [128, 64, 32, 16]
+        if not hidden_layers:
+            raise ValueError("hidden_layers must contain at least one hidden size")
+
+        layers = []
+        in_features = input_size
+        for hidden_size in hidden_layers:
+            layers.append(nn.Linear(in_features, int(hidden_size)))
+            layers.append(nn.ReLU())
+            in_features = int(hidden_size)
+        layers.append(nn.Linear(in_features, 1))
+        self.network = nn.Sequential(*layers)
 
     def forward(self, x):
-        x = torch.relu(self.fc1(x))
-        x = torch.relu(self.fc2(x))
-        x = torch.relu(self.fc3(x))
-        x = torch.relu(self.fc4(x))
-        return self.fc5(x)
+        return self.network(x)
 
 
 class BaseModel:
     """Base class with shared training infrastructure for all model variants."""
 
     def __init__(self, input_size, lr=0.001, epochs=100, batch_size=32,
-                 optimizer_choice='Adam', loss_function_choice='MSE'):
+                 optimizer_choice='Adam', loss_function_choice='MSE',
+                 hidden_layers=None):
         self.lr = lr
         self.epochs = epochs
         self.batch_size = batch_size
         self.optimizer_choice = optimizer_choice
         self.loss_function_choice = loss_function_choice
+        self.hidden_layers = hidden_layers or [128, 64, 32, 16]
         self.device = self._get_device()
 
         torch.manual_seed(DataConfig.RANDOM_STATE)
 
-        self.model = ShipSpeedPredictor(input_size).to(self.device)
+        self.model = ShipSpeedPredictor(input_size, hidden_layers=self.hidden_layers).to(self.device)
         initialize_weights(self.model)
 
     @staticmethod

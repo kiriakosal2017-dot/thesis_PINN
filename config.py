@@ -58,6 +58,12 @@ class ShipConfig:
     MASS = _get_float('SHIP_DISPLACEMENT', '115000000.0')
     ADDED_MASS_COEFF = _get_float('ADDED_MASS_COEFF', '0.1')
 
+class PropellerConfig:
+    D = _get_float('PROPELLER_DIAMETER', '6.95')
+    Z = _get_int('PROPELLER_BLADES', '5')
+    P_D = _get_float('PROPELLER_PITCH_RATIO', '0.7718')
+    AE_A0 = _get_float('PROPELLER_AREA_RATIO', '0.52')
+
 
 class SequenceConfig:
     LENGTH = _get_int('SEQUENCE_LENGTH', '10')
@@ -76,5 +82,5 @@ class TrainingConfig:
     OPTIMIZER = _get_str('DEFAULT_OPTIMIZER', 'Adam')
     LOSS_FUNCTION = _get_str('DEFAULT_LOSS_FUNCTION', 'MSE')
     WEIGHT_DECAY = _get_float('WEIGHT_DECAY', '1e-5')
-    EARLY_STOPPING_PATIENCE = _get_int('EARLY_STOPPING_PATIENCE', '20')
+    EARLY_STOPPING_PATIENCE = _get_int('EARLY_STOPPING_PATIENCE', '150')
     EARLY_STOPPING_MIN_DELTA = _get_float('EARLY_STOPPING_MIN_DELTA', '1e-4')
