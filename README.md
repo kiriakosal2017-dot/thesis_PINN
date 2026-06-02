@@ -1,181 +1,215 @@
-# Predicting Ship Propulsion Power using Physics-Guided Neural Networks (PGNN) and Physics-Informed Neural Networks (PINN)
+# Ship Shaft Power Prediction with a Physics-Informed Neural ODE (PI-NODE)
 
 ## Introduction
 
-This project explores the use of Physics-Guided Neural Networks (PGNNs) and Physics-Informed Neural Networks (PINNs) to predict ship propulsion power. By incorporating physical laws into the neural network training process, we aim to improve the model's predictive capabilities and assess whether PGNNs/PINNs offer advantages over purely data-driven models.
+This project predicts a vessel's **shaft power** from real-world operational time-series data (speed, drafts, trim, RPM, weather). Its core contribution is a **grey-box** architecture — the **Physics-Informed Neural ODE (PI-NODE)** — that constrains a neural network with the rigid laws of **propeller hydrodynamics** instead of the noisy empirical hull-resistance formulas (ITTC-78) commonly used in the literature.
+
+The PI-NODE is benchmarked against two established baselines:
+
+- **DATA** — a pure data-driven MLP (black box).
+- **HYBRID** — a soft-physics PINN that penalizes deviations from ITTC-78 resistance formulas.
+
+The central finding is that forcing empirical *hull*-resistance physics onto a model in real sea states **degrades** accuracy, whereas constraining the model with accurate *propeller* physics acts as a powerful inductive bias that improves accuracy **and** enables zero-shot transfer to unseen vessels.
+
+> **Full theory and experimental record** live in `docs/`:
+> - `docs/PI_NODE_THEORY_AND_ARCHITECTURE.md` — architecture, equations, training infrastructure.
+> - `docs/EXPERIMENTAL_PLAN.md` — dataset, methodology, and all results (Phases 1–5).
+> - `docs/PHYSICS_EVALUATION_AND_LLM_PROMPT.md` — positioning vs. recent literature.
+
+## Why the Propeller? (The Core Idea)
+
+Most physics-informed approaches inject the **entire ship resistance** (frictional, wave-making, air) into the loss function. But these empirical hull formulas carry 10–15% error in real sea states, so forcing the network to satisfy them makes it inherit their errors (this is exactly why the HYBRID baseline performs *worse* than the pure DATA model).
+
+The PI-NODE instead shifts the physical constraints to the **propeller**, whose operation obeys much stricter kinematic/dynamic laws (Wageningen B-Series). The neural network becomes a **"virtual sensor"** that predicts the three unmeasurable *propulsive factors*:
+
+- **Wake fraction** `w`
+- **Thrust deduction factor** `t`
+- **Relative rotative efficiency** `η_R`
+
+These are then routed through analytically exact propeller equations to compute power.
+
+## Architecture (Dual-Branch)
+
+The model splits the problem into two physical regimes to prevent parameter entanglement between slow-varying hull phenomena and fast-varying weather disturbances.
+
+**Branch A — Calm-Water Dynamics (Neural ODE)**
+- Inputs: Speed-Through-Water, Fore/Aft draft, Trim, RPM (weather excluded).
+- An `Encoder → Neural ODE (torchdiffeq) → Decoder` integrates the latent state over time, capturing inertia/transients that static MLPs cannot.
+- Outputs the calm-water factors `[w_calm, t_calm, η_R_calm]` (bounded via sigmoid).
+
+**Branch B — Sea-State Residual (Weather MLP)**
+- Inputs: relative/true wind speed and direction.
+- A small feed-forward MLP outputs instantaneous residual corrections `[Δw, Δt, Δη_R]`.
+
+**Aggregation + Physics Layer (analytical, non-negotiable)**
+```
+w_total  = w_calm + Δw      (clamped to physical bounds)
+t_total  = t_calm + Δt
+η_R_total = η_R_calm + Δη_R
+
+Va = V_ship · (1 − w_total)          # advance speed
+J  = Va / (n · D)                    # advance coefficient
+K_T(J) = b0 + b1·J + b2·J² + b3·J³   # trainable (B-Series init)
+K_Q(J) = c0 + c1·J + c2·J² + c3·J³   # trainable (B-Series init)
+Q = K_Q · ρ · n² · D⁵                # torque
+P = 2π · n · Q                       # shaft power
+```
+
+The `K_T` / `K_Q` polynomial coefficients are **trainable** so the model can account for long-term propeller degradation (biofouling), while physics-informed penalties keep them realistic.
+
+**Physics-Informed Loss**
+```
+L = SmoothL1(P_pred, P_true)
+  + λ_range     · (K_T, K_Q stay positive / within bounds)
+  + λ_curvature · (penalize 2nd derivative → no unrealistic oscillation)
+  + λ_prior     · (keep coefficients near B-Series init)
+  + λ_η0        · (enforce η0 = J·K_T / (2π·K_Q) ∈ [0.40, 0.75])
+```
+
+Training uses `ReduceLROnPlateau`, gradient clipping (max-norm 5.0), and a 1.5× LR boost on the polynomial coefficients. See `docs/PI_NODE_THEORY_AND_ARCHITECTURE.md` for details.
 
 ## Repository Structure
 
 ```
-├── .env                # All configurable parameters (ship constants, paths, training defaults)
-├── config.py           # Loads .env into typed config classes
-├── base_model.py       # Shared NN architecture and training infrastructure
-├── read_data.py        # Data loading, preprocessing, and scaling
-├── main_DATA.py        # Data-driven neural network model
-├── main_PGNN.py        # Physics-Guided Neural Network (ship resistance loss)
-├── main_PINN.py        # Physics-Informed Neural Network (PDE residuals + boundary conditions)
-├── power_charts.py     # Physics validation: calculated vs. actual power plots
-├── requirements.txt    # Python dependencies
-└── data/               # Ship operational data (not tracked in git)
+.
+├── config.py                      # Loads .env into typed config classes
+├── read_data.py                   # DataProcessor: loading, filtering, scaling, sequencing
+├── base_model.py                  # Shared MLP architecture (DATA / HYBRID)
+│
+├── main_DATA.py                   # Baseline 1: pure data-driven MLP
+├── main_HYBRID.py                 # Baseline 2: soft-physics PINN (ITTC-78 penalties)
+├── main_PI_NODE_Propeller.py      # The PI-NODE model (Neural ODE + propeller physics)
+│
+├── prepare_ship_data.py           # Merge raw per-ship CSVs into DANAE's schema
+├── sweep_pinode_regularization.py # Phase 2: regularization-weight sweep
+├── train_final_pinode.py          # Phase 2.2: train + save the final PI-NODE
+│
+├── evaluate_baselines.py          # Phase 1: DATA vs HYBRID on DANAE
+├── evaluate_transient.py          # Phase 3: steady-state vs transient regimes
+├── evaluate_transfer.py           # Phase 4: zero-shot transfer to unseen vessels
+├── evaluate_fewshot.py            # Phase 5: few-shot fine-tuning on a new vessel
+├── quick_compare.py               # Quick DATA-vs-PI-NODE sanity check
+│
+├── .env.<ship>                    # Per-vessel constants (danae, kastor, thalia, ...)
+├── results/                       # Sweep CSV + checkpoints
+├── docs/                          # Theory, experimental plan, literature notes
+└── PhD/                           # Raw vessel data (Excel/CSV) and technical drawings
 ```
 
-## Features
-
-- **Data Preprocessing**: Handles missing values and scales features using StandardScaler.
-- **Data-Driven Model**: A multi-layer neural network trained solely on data to predict propulsion power.
-- **Physics-Guided Neural Network**: Enhances the data-driven model by adding a physics-based loss term derived from ship resistance equations.
-- **Physics-Informed Neural Network**: Enhances the data-driven model by adding a PDE loss term derived from ship resistance partial derivative equations.
-- **Hyperparameter Tuning**: Uses grid search and k-fold cross-validation to find optimal learning rates and batch sizes.
-- **Model Evaluation**: Provides training and validation loss during training and evaluates the final model on a test set.
-- **Centralized Configuration**: All ship constants, data paths, column names, and training defaults are configured via a `.env` file.
+Saved artifacts: `best_model_DATA_danae.pt`, `best_model_HYBRID_danae.pt`, `best_model_PI_NODE_danae.pt`, plus the fitted scalers `data_processor_danae.pkl` (tabular) and `data_processor_danae_temporal.pkl` (sequenced).
 
 ## Requirements
 
-Python 3.12.2. It is advised to run under a virtual environment created with `requirements.txt` to ensure trouble-free execution.
+Python 3.12.2. Install dependencies into a virtual environment:
 
-## Installation
+```bash
+python -m venv venv
+source venv/bin/activate           # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+```
 
-1. Clone the repository:
-
-        git clone https://github.com/kiriakosal2017-dot/thesis_PINN.git
-
-2. Set up a virtual environment (optional but recommended):
-
-        python -m venv venv
-        source venv/bin/activate  # On Windows, use `venv\Scripts\activate`
-
-3. Install dependencies:
-
-        pip install -r requirements.txt
+Key dependencies include PyTorch, `torchdiffeq` (Neural ODE solver), scikit-learn, pandas, and `python-dotenv`. Training auto-selects CUDA → MPS → CPU.
 
 ## Configuration
 
-All configurable parameters are in the `.env` file at the project root. Edit it to match your setup:
+All tunable parameters live in `.env` files loaded by `config.py`. Each vessel has its own file (`.env.danae`, `.env.kastor`, ...) carrying that ship's constants. Key groups:
 
-- **Data paths**: `DATA_FILE_PATH`, `TARGET_COLUMN`, `DROP_COLUMNS`
-- **Data filtering**: `MIN_POWER`, `MIN_SPEED`
-- **Column names**: `SPEED_COLUMN`, `WAVE_HEIGHT_COLUMN`, `DRAFT_FORE_COLUMN`, etc.
-- **Ship constants**: `WATER_DENSITY`, `WETTED_SURFACE_AREA`, `SHIP_LENGTH`, etc.
-- **Training defaults**: `DEFAULT_EPOCHS_CV`, `DEFAULT_EPOCHS_FINAL`, `DEFAULT_OPTIMIZER`, etc.
+- **Data**: `DATA_FILE_PATH`, `TARGET_COLUMN`, `DROP_COLUMNS`, `MIN_POWER`, `MIN_SPEED`.
+- **Columns**: `SPEED_COLUMN`, `DRAFT_FORE_COLUMN`, `DRAFT_AFT_COLUMN`, etc.
+- **Ship**: `WATER_DENSITY`, `SHIP_LENGTH`, `SHIP_DISPLACEMENT`, `PROPULSIVE_EFFICIENCY`, ...
+- **Propeller** (`PropellerConfig`): `PROPELLER_DIAMETER`, `PROPELLER_BLADES`, `PROPELLER_PITCH_RATIO`, `PROPELLER_AREA_RATIO`.
+- **Sequencing**: `SEQUENCE_LENGTH` (default 10 timesteps for the ODE), `MAX_TIME_GAP_SECONDS`.
+- **Training**: `DEFAULT_EPOCHS_FINAL`, `DEFAULT_OPTIMIZER`, `EARLY_STOPPING_PATIENCE`, etc.
 
-## Data Preparation
+> **Data leakage prevention:** columns directly derived from the target (Shaft Torque, Shaft Thrust, Propeller-Shaft-Power, ME RPM) are excluded via `DROP_COLUMNS`. The PI-NODE temporarily re-includes `Propeller-Shaft-RPM`, which it needs as a physical input.
 
-Ensure that you have the required CSV data files in the `data/` directory. The data path is configured in `.env` via the `DATA_FILE_PATH` variable.
+To switch the active vessel, copy its env file over the active one:
+
+```bash
+cp .env.kastor .env
+```
+
+## Dataset
+
+The source (training) domain is **M/V DANAE**, an 82,000 DWT bulk carrier (Laros Shipping), ~120,000 usable records from April–September 2022. The target is **Shaft Power_TRQM** (kW) from the onboard torque meter.
+
+Preprocessing (`read_data.py`): filter port/anchor rows (power < 1000 kW or speed < 4 kn), fill NaNs with column medians, standardize features and target with `StandardScaler` (fitted on train only), and split 80/20 **chronologically** (no shuffling). For the PI-NODE, overlapping windows of 10 consecutive timesteps are created via `create_sequences`.
 
 ## Usage
 
-### Data Preprocessing
+### 1. Train the baselines (Phase 1)
+```bash
+python -u evaluate_baselines.py
+```
 
-        python read_data.py
+### 2. Tune and train the PI-NODE (Phase 2)
+```bash
+python -u sweep_pinode_regularization.py   # regularization sweep (auto-resumes via results/ CSV)
+python -u train_final_pinode.py            # train winning config, save weights + scaler
+```
+You can also run the PI-NODE module directly for a quick standalone run:
+```bash
+python -u main_PI_NODE_Propeller.py
+```
 
-This will load the dataset, handle missing values (fill with median), filter by power/speed thresholds, scale features, and split into training/testing sets.
+### 3. Transient analysis (Phase 3)
+```bash
+python -u evaluate_transient.py
+```
 
-### Physics Validation
+### 4. Zero-shot transfer to an unseen vessel (Phase 4)
+```bash
+cp .env.kastor .env        # swap in the target ship's constants
+python -u evaluate_transfer.py
+cp .env.danae .env         # restore source vessel
+```
+For PI-NODE, transfer needs **only** swapping the propeller constants in `.env` — the network weights stay frozen and the analytical equations adapt to the target propeller geometry.
 
-        python power_charts.py
+### 5. Few-shot fine-tuning (Phase 5)
+```bash
+cp .env.kastor .env
+python -u evaluate_fewshot.py
+cp .env.danae .env
+```
 
-Plots calculated shaft power (from resistance equations) against actual power from the dataset for visual comparison.
+### Adding a new vessel
+```bash
+python prepare_ship_data.py kastor   # merge raw CSVs into DANAE's schema
+```
 
-### Running the Data-Driven Model
+## Results Summary
 
-        python main_DATA.py
+**Source domain (DANAE):**
 
-Performs hyperparameter tuning (learning rate and batch size) using k-fold cross-validation, trains the final model with the best hyperparameters, and evaluates on the test set (RMSE).
+| Model   | Test RMSE (kW) | vs DATA  | Description |
+|---------|---------------:|----------|-------------|
+| **PI-NODE** | **275.95** | **−35.0%** | Grey-box: Neural ODE + hard propeller physics |
+| DATA    | 424.80         | baseline | Black-box MLP |
+| HYBRID  | 703.69         | +65.6%   | Soft-physics MLP + ITTC-78 penalties |
 
-### Running the Physics-Guided Neural Network (PGNN)
+**Zero-shot transfer (trained on DANAE, no retraining), MAPE:**
 
-        python main_PGNN.py
+| Target ship | PI-NODE | DATA | HYBRID |
+|-------------|--------:|-----:|-------:|
+| KASTOR (sister, 82K) | **4.39%** | 7.47% | 26.25% |
+| MENELAOS (64K)       | **11.76%** | 40.55% | 30.39% |
+| THALIA (different class) | **18.33%** | 44.49% | 33.53% |
+| THISSEAS (75.2K)     | **18.03%** | 83.40% | 82.68% |
 
-Incorporates ship resistance equations (frictional, wave-making, appendage, transom, correlation allowance, and added wave resistance) into the loss function. Tunes `alpha`, `beta`, and `k_wave` alongside learning rate and batch size.
+| Phase | Key finding |
+|-------|-------------|
+| **1–2 Source domain** | PI-NODE: 275.95 kW RMSE (~3.1% MAPE) — 35% better than DATA, 61% better than HYBRID. |
+| **3 Transient** | PI-NODE holds ~3% MAPE across all regimes; HYBRID degrades most in transients (ITTC-78 assumes steady state). |
+| **4 Zero-shot** | PI-NODE achieves 4–18% MAPE on unseen vessels; its advantage **grows** with ship dissimilarity (1.7× → 4.6×). |
+| **5 Few-shot** | PI-NODE reaches commercial accuracy (~5%) with ~2 days of data; DATA needs ~3 weeks. Sister ships need zero data. |
 
-### Running the Physics-Informed Neural Network (PINN)
-
-        python main_PINN.py
-
-Incorporates PDE residuals using automatic differentiation and boundary conditions (P=0 when V=0) into the loss. Tunes `alpha`, `beta`, and `gamma` alongside learning rate and batch size.
-
-## Formulation of a PDE for the Problem (PINN)
-
-Assuming we can model the resistance R as a function of speed V and other variables, we consider a PDE:
-
-![image](https://github.com/user-attachments/assets/c72f77d4-7d20-4d31-920c-0dc76dcc7fec)
-
-Where:
-- P is the Power (the target variable of the data model).
-- V is the Speed-Through-Water.
-- a and b are constants derived from physical considerations.
-
-## Physics-Based Loss Function (PGNN)
-
-The PGNN incorporates a physics-based loss term calculated using ship resistance equations:
-
-- Frictional Resistance
-
-![image](https://github.com/user-attachments/assets/7ff9b3d1-fb57-4cf5-a885-3f4148322d84)
-
-It is calculated using the ITTC-1957 formula, the frictional resistance coefficient accounts for the friction between the ship's hull and the water.
-
-- Wave-Making Resistance
-
-  ![image](https://github.com/user-attachments/assets/5dbf4b12-984d-4e44-8a36-ad1290fcdb90)
-
-Wave-making resistance is caused by the energy lost in generating waves as the ship moves through the water. It is influenced by the ship's speed and trim.
-
-- Appendage Resistance
-
-![image](https://github.com/user-attachments/assets/99d428c4-6b61-4697-9a93-ebfde8f9ca95)
-
-Appendage resistance accounts for the additional resistance from appendages such as rudders, shafts, and propellers.
-
-- Transom Stern Resistance
-
-![image](https://github.com/user-attachments/assets/9e77f536-ec0c-488f-a6fb-bb5ce40776f0)
-
-Transom stern resistance is significant for ships with a flat stern (transom) and is calculated using the transom Froude number.
-
-- Correlation Allowance Resistance
-
-![image](https://github.com/user-attachments/assets/21007a57-e06d-407b-8fb2-d0b841bcad94)
-
-This is an empirical correction factor to account for additional resistance not captured by other components.
-
-- Added Resistance due to waves
-
-![image](https://github.com/user-attachments/assets/c84ba982-d45f-4eed-af88-1195b8d277b1)
-
-Where:
-
-![image](https://github.com/user-attachments/assets/7ff1d96c-18eb-426d-8bfe-3e72edc4a105)
-
-and:
-
-![image](https://github.com/user-attachments/assets/dd9a3f4d-2fb0-4d84-875e-ce887a87d553)
-
-![image](https://github.com/user-attachments/assets/13c194a4-48f0-4dc9-b7f7-1bd48662a21c)
-
-Finally the physics-based loss is computed as the squared difference between the predicted power and the power calculated using the total resistance and propulsive efficiency:
-
-![Screenshot_2](https://github.com/user-attachments/assets/88e88f14-73b3-4232-92ed-693ce98a8c87)
-
-## Hyperparameter Tuning
-
-All three models perform hyperparameter tuning over a predefined grid using k-fold cross-validation (default is 5 folds). Training defaults (epochs, optimizer, loss function) are configured in `.env`.
-
-## Results
-
-- **Training Loss**: Displayed during each epoch for all models.
-- **Validation Loss**: Reported during hyperparameter tuning for each parameter combination.
-- **Test Loss**: Final evaluation metric on the test set.
-
-Compare the test losses of all three models to assess the impact of incorporating physics into the model.
+**Defining result:** physics-informed architectures provide disproportionately larger benefits precisely when needed most — on unseen vessels.
 
 ## Acknowledgments
 
-- Special thanks to Christoforos Rekatsinas (Ph.D.) for his guidance and support.
+Special thanks to Christoforos Rekatsinas (Ph.D.) for his guidance and support.
 
 ## Contact
-
-For any questions or inquiries, please contact:
 
 - Alexiou Kiriakos
 - Email: kiriakosal2004@yahoo.gr
