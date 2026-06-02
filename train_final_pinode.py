@@ -5,7 +5,7 @@ Winning config from sweep: lambda_range=0.25, lambda_curv=0.01, lambda_prior=0.0
 """
 import pickle
 import torch
-from read_data import DataProcessor, create_sequences
+from read_data import DataProcessor, create_sequences, split_calm_weather_indices
 from config import DataConfig, SequenceConfig
 from main_PI_NODE_Propeller import PINODEPropellerModel
 
@@ -23,16 +23,7 @@ def main():
     X_train, X_test, X_train_uns, X_test_uns, y_train, y_test, _, _ = res
     feature_indices = {c: i for i, c in enumerate(X_train.columns)}
 
-    calm_water_cols = [
-        col for col in X_train.columns
-        if not any(w in col.lower() for w in ['wind', 'wave', 'swell'])
-    ]
-    weather_cols = [
-        col for col in X_train.columns
-        if any(w in col.lower() for w in ['wind', 'wave', 'swell'])
-    ]
-    calm_water_indices = [feature_indices[col] for col in calm_water_cols]
-    weather_indices = [feature_indices[col] for col in weather_cols]
+    calm_water_indices, weather_indices = split_calm_weather_indices(X_train.columns)
     print(f"Calm-water features: {len(calm_water_indices)}, Weather features: {len(weather_indices)}")
 
     seq_len = SequenceConfig.LENGTH

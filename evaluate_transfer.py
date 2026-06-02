@@ -18,7 +18,7 @@ import numpy as np
 import torch
 from dotenv import load_dotenv
 
-from read_data import DataProcessor, create_sequences
+from read_data import DataProcessor, create_sequences, split_calm_weather_indices
 from config import DataConfig, SequenceConfig, PropellerConfig
 from main_DATA import DataDrivenModel
 from main_HYBRID import UnifiedPhysicsHybridModel
@@ -147,16 +147,7 @@ def evaluate_pinode_zeroshot(proc_temp_target, X_train_t, X_test_t, X_train_uns_
     danae_features = list(proc_danae.scaler_X.feature_names_in_)
     feature_indices = {c: i for i, c in enumerate(danae_features)}
 
-    calm_water_cols = [
-        col for col in danae_features
-        if not any(w in col.lower() for w in ['wind', 'wave', 'swell'])
-    ]
-    weather_cols = [
-        col for col in danae_features
-        if any(w in col.lower() for w in ['wind', 'wave', 'swell'])
-    ]
-    calm_water_indices = [feature_indices[col] for col in calm_water_cols]
-    weather_indices = [feature_indices[col] for col in weather_cols]
+    calm_water_indices, weather_indices = split_calm_weather_indices(danae_features)
 
     input_size = len(danae_features)
 

@@ -1,9 +1,25 @@
+import random
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
 from config import DataConfig, TrainingConfig
+
+
+def set_global_seed(seed):
+    """Seed Python, NumPy and PyTorch RNGs for reproducible runs.
+
+    Seeding NumPy matters here because the HYBRID model draws collocation/boundary
+    points with ``np.random``; seeding torch covers weight init and DataLoader
+    shuffling. Call this with a different seed per run for multi-seed experiments.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def initialize_weights(model):
@@ -51,7 +67,7 @@ class BaseModel:
         self.hidden_layers = hidden_layers or [128, 64, 32, 16]
         self.device = self._get_device()
 
-        torch.manual_seed(DataConfig.RANDOM_STATE)
+        set_global_seed(DataConfig.RANDOM_STATE)
 
         self.model = ShipSpeedPredictor(input_size, hidden_layers=self.hidden_layers).to(self.device)
         initialize_weights(self.model)
