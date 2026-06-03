@@ -96,11 +96,17 @@ class _Decoder(nn.Module):
 class PropellerNeuralODEPredictor(nn.Module):
     def __init__(self, input_size, calm_water_indices, weather_indices, hidden_size=64, ode_num_layers=2,
                  dropout=0.1, solver='rk4', use_adjoint=False,
-                 n_ode_steps=10, encoder_mode='first'):
+                 n_ode_steps=10, encoder_mode='first', use_ode=True, use_weather=True):
         super().__init__()
         self.encoder_mode = encoder_mode
         self.calm_water_indices = calm_water_indices
         self.weather_indices = weather_indices
+        # Ablation switches (defaults preserve the full PI-NODE behaviour):
+        #   use_ode=False     -> skip the Neural ODE integration (decode z0 directly),
+        #                        turning Branch A into a plain encoder baseline.
+        #   use_weather=False -> disable the Sea-State residual branch (no [dw,dt,deta_R]).
+        self.use_ode = use_ode
+        self.use_weather = use_weather
         
         calm_input_size = len(calm_water_indices)
         weather_input_size = len(weather_indices)
@@ -163,25 +169,30 @@ class PropellerNeuralODEPredictor(nn.Module):
                 "Supported modes: 'first', 'last_mean', 'gru'."
             )
 
-        self.ode_func.set_context(ctx)
+        if self.use_ode:
+            self.ode_func.set_context(ctx)
 
-        t_span = torch.linspace(0.0, 1.0, self.n_ode_steps + 1,
-                                device=z0.device, dtype=z0.dtype)
+            t_span = torch.linspace(0.0, 1.0, self.n_ode_steps + 1,
+                                    device=z0.device, dtype=z0.dtype)
 
-        if self.use_adjoint:
-            adjoint_params = tuple(self.ode_func.parameters()) + (ctx,)
-            z_traj = _odeint_adjoint(
-                self.ode_func, z0, t_span,
-                method=self.solver,
-                adjoint_params=adjoint_params,
-            )
+            if self.use_adjoint:
+                adjoint_params = tuple(self.ode_func.parameters()) + (ctx,)
+                z_traj = _odeint_adjoint(
+                    self.ode_func, z0, t_span,
+                    method=self.solver,
+                    adjoint_params=adjoint_params,
+                )
+            else:
+                z_traj = _odeint(
+                    self.ode_func, z0, t_span,
+                    method=self.solver,
+                )
+
+            z_final = z_traj[-1]
         else:
-            z_traj = _odeint(
-                self.ode_func, z0, t_span,
-                method=self.solver,
-            )
+            # Ablation: no ODE — decode the encoded latent state directly.
+            z_final = z0
 
-        z_final = z_traj[-1]
         out_calm = self.decoder(z_final)
         
         # Transform calm outputs
@@ -190,12 +201,18 @@ class PropellerNeuralODEPredictor(nn.Module):
         eta_R_calm = 0.95 + 0.15 * torch.sigmoid(out_calm[:, 2:3])
         
         # --- Branch B: Weather Residual ---
-        out_residual = self.weather_residual_net(x_weather_last)
-        
-        # Residuals are unbounded but typically small, initialized around 0
-        dw = out_residual[:, 0:1] * 0.1  # scaling factor to keep initial predictions small
-        dt = out_residual[:, 1:2] * 0.1
-        deta_R = out_residual[:, 2:3] * 0.05
+        if self.use_weather:
+            out_residual = self.weather_residual_net(x_weather_last)
+
+            # Residuals are unbounded but typically small, initialized around 0
+            dw = out_residual[:, 0:1] * 0.1  # scaling factor to keep initial predictions small
+            dt = out_residual[:, 1:2] * 0.1
+            deta_R = out_residual[:, 2:3] * 0.05
+        else:
+            # Ablation: no Sea-State residual branch.
+            dw = torch.zeros_like(w_calm)
+            dt = torch.zeros_like(t_calm)
+            deta_R = torch.zeros_like(eta_R_calm)
         
         # --- Total ---
         w_total = w_calm + dw
@@ -226,7 +243,8 @@ class PINODEPropellerModel:
                  dropout=0.1, solver='rk4', use_adjoint=False,
                  n_ode_steps=10, lr=0.001, epochs=100, batch_size=32,
                  optimizer_choice='Adam', loss_function_choice='MSE',
-                 weight_decay=0.0, seed=None, encoder_mode='first'):
+                 weight_decay=0.0, seed=None, encoder_mode='first',
+                 use_ode=True, use_weather=True, freeze_polynomials=False):
         self.input_size = input_size
         self.feature_indices = feature_indices
         self.calm_water_indices = calm_water_indices
@@ -245,6 +263,9 @@ class PINODEPropellerModel:
         self.loss_function_choice = loss_function_choice
         self.weight_decay = weight_decay
         self.encoder_mode = encoder_mode
+        self.use_ode = use_ode
+        self.use_weather = use_weather
+        self.freeze_polynomials = freeze_polynomials
         self.device = self._get_device()
 
         self.seed = DataConfig.RANDOM_STATE if seed is None else seed
@@ -261,7 +282,17 @@ class PINODEPropellerModel:
             use_adjoint=use_adjoint,
             n_ode_steps=n_ode_steps,
             encoder_mode=encoder_mode,
+            use_ode=use_ode,
+            use_weather=use_weather,
         )
+
+        # Ablation: optionally freeze the trainable K_T/K_Q polynomial coefficients
+        # at their B-series initialization (tests whether learnable physics helps).
+        if freeze_polynomials:
+            for name, param in self.model.named_parameters():
+                if name.startswith('kq_') or name.startswith('kt_'):
+                    param.requires_grad_(False)
+
         self._move_model_to_device_with_fallback()
 
     def _move_model_to_device_with_fallback(self):
