@@ -13,7 +13,7 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
-from read_data import DataProcessor, create_sequences
+from read_data import DataProcessor, create_sequences, split_calm_weather_indices
 from config import DataConfig, SequenceConfig, ColumnConfig
 from main_DATA import DataDrivenModel
 from main_HYBRID import UnifiedPhysicsHybridModel
@@ -110,16 +110,7 @@ def evaluate_pinode_model(proc, X_train, X_test, X_train_uns, X_test_uns, y_trai
     print("\n--- PI-NODE Model ---")
     feature_indices = {c: i for i, c in enumerate(X_train.columns)}
 
-    calm_water_cols = [
-        col for col in X_train.columns
-        if not any(w in col.lower() for w in ['wind', 'wave', 'swell'])
-    ]
-    weather_cols = [
-        col for col in X_train.columns
-        if any(w in col.lower() for w in ['wind', 'wave', 'swell'])
-    ]
-    calm_water_indices = [feature_indices[col] for col in calm_water_cols]
-    weather_indices = [feature_indices[col] for col in weather_cols]
+    calm_water_indices, weather_indices = split_calm_weather_indices(X_train.columns)
 
     seq_len = SequenceConfig.LENGTH
     X_te_seq, X_te_uns_seq, y_te_seq = create_sequences(

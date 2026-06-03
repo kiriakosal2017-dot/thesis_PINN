@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from read_data import DataProcessor, create_sequences
+from read_data import DataProcessor, create_sequences, split_calm_weather_indices
 from config import DataConfig, SequenceConfig
 
 from main_DATA import DataDrivenModel
@@ -87,19 +87,9 @@ def main():
     print("Training PI-NODE Propeller Model")
     print("="*50)
     feature_indices = {c: i for i, c in enumerate(X_train_t.columns)}
-    
-    # Identify Calm-Water vs Weather indices
-    calm_water_columns = ['Speed-Through-Water', 'Fore draft_AMS', 'Aft draft_AMS', 'Trim_AMS', 'Propeller-Shaft-RPM']
-    weather_columns = ['True-Wind-Speed', 'True-Wind-Direction', 'Wind_angle_BRG_WIND', 'Rel-Wind-Speed', 'Rel-Wind-Direction']
-    
-    calm_water_indices = [feature_indices[col] for col in calm_water_columns if col in feature_indices]
-    weather_indices = [feature_indices[col] for col in weather_columns if col in feature_indices]
-    
-    all_known = set(calm_water_indices + weather_indices)
-    for col, idx in feature_indices.items():
-        if idx not in all_known:
-            calm_water_indices.append(idx)
-            
+
+    # Identify Calm-Water vs Weather indices (dt/acceleration excluded from both).
+    calm_water_indices, weather_indices = split_calm_weather_indices(X_train_t.columns)
     print(f"Calm water features: {len(calm_water_indices)}, Weather features: {len(weather_indices)}")
     
     node_model = PINODEPropellerModel(

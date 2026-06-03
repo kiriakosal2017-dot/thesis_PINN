@@ -36,7 +36,8 @@ from config import (
     DataConfig, ColumnConfig, ShipConfig, SequenceConfig,
     TrainingConfig, ModelConfig, PropellerConfig
 )
-from read_data import DataProcessor, create_sequences
+from base_model import set_global_seed
+from read_data import DataProcessor, create_sequences, split_calm_weather_indices
 
 
 # ── Neural ODE building blocks ────────────────────────────────────
@@ -247,7 +248,7 @@ class PINODEPropellerModel:
         self.device = self._get_device()
 
         self.seed = DataConfig.RANDOM_STATE if seed is None else seed
-        torch.manual_seed(self.seed)
+        set_global_seed(self.seed)
 
         self.model = PropellerNeuralODEPredictor(
             input_size=input_size,
@@ -573,18 +574,8 @@ if __name__ == "__main__":
     
     n_val = int(len(X_tr_seq) * 0.2)
     
-    # Identify Calm-Water vs Weather indices
-    calm_water_columns = ['Speed-Through-Water', 'Fore draft_AMS', 'Aft draft_AMS', 'Trim_AMS', 'Propeller-Shaft-RPM']
-    weather_columns = ['True-Wind-Speed', 'True-Wind-Direction', 'Wind_angle_BRG_WIND', 'Rel-Wind-Speed', 'Rel-Wind-Direction']
-    
-    calm_water_indices = [feature_indices[col] for col in calm_water_columns if col in feature_indices]
-    weather_indices = [feature_indices[col] for col in weather_columns if col in feature_indices]
-    
-    all_known = set(calm_water_indices + weather_indices)
-    for col, idx in feature_indices.items():
-        if idx not in all_known:
-            calm_water_indices.append(idx)
-            
+    # Identify Calm-Water vs Weather indices (dt/acceleration excluded from both).
+    calm_water_indices, weather_indices = split_calm_weather_indices(X_train.columns)
     print(f"Calm water features: {len(calm_water_indices)}, Weather features: {len(weather_indices)}")
     
     model = PINODEPropellerModel(

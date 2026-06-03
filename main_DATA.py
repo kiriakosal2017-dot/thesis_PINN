@@ -188,8 +188,10 @@ if __name__ == "__main__":
             X_train, y_train, param_grid, data_processor, k_folds=5
         )
 
+        # Chronological validation split (no shuffle) to match the temporal protocol
+        # used everywhere else and avoid leaking future rows into validation.
         X_train_final, X_val_final, y_train_final, y_val_final = train_test_split(
-            X_train, y_train, test_size=DataConfig.TEST_SIZE, random_state=DataConfig.RANDOM_STATE
+            X_train, y_train, test_size=DataConfig.TEST_SIZE, shuffle=False
         )
 
         final_model = DataDrivenModel(

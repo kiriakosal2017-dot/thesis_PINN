@@ -64,15 +64,15 @@ def main():
     X_val_hybrid = X_train_tab.iloc[-n_val_tab:]
     y_val_hybrid = y_train_tab.iloc[-n_val_tab:]
     
-    train_loader_hybrid = hybrid_model.prepare_dataloader(X_tr_hybrid, y_tr_hybrid)
-    unscaled_loader_hybrid = hybrid_model.prepare_unscaled_dataloader(X_tr_unscaled_hybrid)
+    train_loader_hybrid = hybrid_model.prepare_combined_dataloader(
+        X_tr_hybrid, X_tr_unscaled_hybrid, y_tr_hybrid, shuffle=True
+    )
     val_loader_hybrid = hybrid_model.prepare_dataloader(X_val_hybrid, y_val_hybrid)
-    
+
     hybrid_feature_indices = {c: i for i, c in enumerate(X_train_tab.columns)}
-    
+
     hybrid_model.train(
         train_loader=train_loader_hybrid,
-        unscaled_loader=unscaled_loader_hybrid,
         X_train_unscaled=X_tr_unscaled_hybrid,
         feature_indices=hybrid_feature_indices,
         data_processor=proc_tabular,

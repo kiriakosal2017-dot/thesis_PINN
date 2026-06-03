@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import torch
 from sklearn.model_selection import KFold, train_test_split
+from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
 from base_model import BaseModel
@@ -38,6 +39,24 @@ class UnifiedPhysicsHybridModel(BaseModel):
         self.beta = beta
         self.gamma = gamma
         self.delta = delta
+
+    def prepare_combined_dataloader(self, X, X_unscaled, y, shuffle=True):
+        """Build a single dataloader yielding (X_scaled, X_unscaled, y) tuples.
+
+        Bundling the scaled features, unscaled features, and target into one dataset
+        lets us shuffle the training data while keeping the physics inputs aligned
+        with their targets — impossible when zipping two independently-shuffled loaders.
+        """
+        X_t = torch.tensor(X.values, dtype=torch.float32)
+        Xu_t = torch.tensor(X_unscaled.values, dtype=torch.float32)
+        y_t = torch.tensor(y.values, dtype=torch.float32).view(-1, 1)
+        dataset = TensorDataset(X_t, Xu_t, y_t)
+        return DataLoader(
+            dataset,
+            batch_size=self._effective_batch_size(len(X)),
+            shuffle=shuffle,
+            num_workers=0,
+        )
 
     @staticmethod
     def _inverse_scale_power_torch(predicted_power_scaled, data_processor):
@@ -161,12 +180,19 @@ class UnifiedPhysicsHybridModel(BaseModel):
         x_boundary_t.requires_grad_(True)
         return x_boundary_t
 
-    def compute_boundary_loss(self, x_boundary):
-        # P(V=0) ~ 0 in normalized target space.
+    def compute_boundary_loss(self, x_boundary, data_processor):
+        # Enforce P(V=0) = 0 kW. In the normalized target space, 0 kW maps to
+        # scaled_zero = (0 - y_mean) / y_std, NOT 0 — pushing the scaled output to 0
+        # would wrongly enforce P = mean(power).
         out = self.model(x_boundary)
-        return torch.mean(out**2)
+        scaler = data_processor.scaler_y
+        scaled_zero = torch.tensor(
+            (0.0 - scaler.mean_[0]) / scaler.scale_[0],
+            dtype=out.dtype, device=out.device,
+        )
+        return torch.mean((out - scaled_zero) ** 2)
 
-    def train(self, train_loader, unscaled_loader, X_train_unscaled, feature_indices, data_processor,
+    def train(self, train_loader, X_train_unscaled, feature_indices, data_processor,
               val_loader=None, checkpoint_path=None):
         optimizer = self.get_optimizer()
         loss_fn = self.get_loss_function()
@@ -181,10 +207,10 @@ class UnifiedPhysicsHybridModel(BaseModel):
             self.model.train()
             run_total = run_data = run_pg = run_pde = run_bc = 0.0
             total_batches = len(train_loader)
-            bar = tqdm(zip(train_loader, unscaled_loader), total=total_batches, desc=f"Epoch {epoch+1}/{self.epochs}")
+            bar = tqdm(train_loader, total=total_batches, desc=f"Epoch {epoch+1}/{self.epochs}")
 
-            for i, ((Xb, yb), (Xub,)) in enumerate(bar):
-                Xb, yb, Xub = Xb.to(self.device), yb.to(self.device), Xub.to(self.device)
+            for i, (Xb, Xub, yb) in enumerate(bar):
+                Xb, Xub, yb = Xb.to(self.device), Xub.to(self.device), yb.to(self.device)
                 optimizer.zero_grad()
 
                 pred = self.model(Xb)
@@ -195,7 +221,7 @@ class UnifiedPhysicsHybridModel(BaseModel):
                 pde_loss = torch.mean(self.compute_pde_residual(x_col, feature_indices) ** 2)
 
                 x_bc = self.sample_boundary_points(self.batch_size, X_train_unscaled, feature_indices, data_processor)
-                bc_loss = self.compute_boundary_loss(x_bc)
+                bc_loss = self.compute_boundary_loss(x_bc, data_processor)
 
                 total_loss = (
                     self.alpha * data_loss
@@ -256,12 +282,11 @@ class UnifiedPhysicsHybridModel(BaseModel):
             Xtr_un = X_unscaled.iloc[tr_idx]
             ytr, yva = y.iloc[tr_idx], y.iloc[va_idx]
 
-            train_loader = self.prepare_dataloader(Xtr, ytr)
-            unscaled_loader = self.prepare_unscaled_dataloader(Xtr_un)
+            train_loader = self.prepare_combined_dataloader(Xtr, Xtr_un, ytr, shuffle=True)
             val_loader = self.prepare_dataloader(Xva, yva)
 
             self.model.apply(self.reset_weights)
-            self.train(train_loader, unscaled_loader, Xtr_un, feature_indices, data_processor, val_loader=val_loader)
+            self.train(train_loader, Xtr_un, feature_indices, data_processor, val_loader=val_loader)
             val_loss = self.evaluate(Xva, yva, dataset_type="Validation", data_processor=data_processor)
             scores.append(val_loss)
         avg = float(np.mean(scores))
@@ -347,8 +372,10 @@ if __name__ == "__main__":
         X_train, X_train_unscaled, y_train, feature_indices, param_grid, dp, k_folds=3
     )
 
+    # Chronological validation split (no shuffle) to match the temporal protocol
+    # used everywhere else and avoid leaking future rows into validation.
     X_tr, X_val, X_tr_un, _, y_tr, y_val = train_test_split(
-        X_train, X_train_unscaled, y_train, test_size=DataConfig.TEST_SIZE, random_state=DataConfig.RANDOM_STATE
+        X_train, X_train_unscaled, y_train, test_size=DataConfig.TEST_SIZE, shuffle=False
     )
 
     model = UnifiedPhysicsHybridModel(
@@ -363,12 +390,10 @@ if __name__ == "__main__":
         gamma=best_params["gamma"],
         delta=best_params["delta"],
     )
-    train_loader = model.prepare_dataloader(X_tr, y_tr)
-    unscaled_loader = model.prepare_unscaled_dataloader(X_tr_un)
+    train_loader = model.prepare_combined_dataloader(X_tr, X_tr_un, y_tr, shuffle=True)
     val_loader = model.prepare_dataloader(X_val, y_val)
     model.train(
         train_loader,
-        unscaled_loader,
         X_tr_un,
         feature_indices,
         dp,

@@ -6,6 +6,36 @@ from pathlib import Path
 from config import DataConfig, ColumnConfig, SequenceConfig
 
 
+# Columns that are derived for sequencing / transient analysis (gap detection,
+# dV/dt) but must NOT be fed to the models as predictive features.
+META_COLUMNS = ('dt', 'acceleration')
+# Substrings that identify weather features (routed to the PI-NODE weather branch).
+WEATHER_KEYWORDS = ('wind', 'wave', 'swell')
+
+
+def split_calm_weather_indices(columns, weather_keywords=WEATHER_KEYWORDS,
+                               exclude=META_COLUMNS):
+    """Split feature columns into calm-water vs weather index lists for the PI-NODE.
+
+    Meta columns (``dt``, ``acceleration``) are excluded from BOTH branches so they
+    are never used as model inputs — they exist only for sequence gap detection and
+    transient-regime analysis. Returned indices are positions into ``columns`` (the
+    full feature order), so they remain valid for indexing the unscaled feature array
+    used by the analytical propeller-physics layer.
+    """
+    columns = list(columns)
+    pos = {c: i for i, c in enumerate(columns)}
+    calm, weather = [], []
+    for c in columns:
+        if c in exclude:
+            continue
+        if any(w in c.lower() for w in weather_keywords):
+            weather.append(pos[c])
+        else:
+            calm.append(pos[c])
+    return calm, weather
+
+
 class DataProcessor:
     def __init__(
         self,
@@ -41,6 +71,24 @@ class DataProcessor:
         if all_nan_numeric:
             self.df.drop(columns=all_nan_numeric, inplace=True)
             print(f"Dropped all-NaN numeric columns: {all_nan_numeric}")
+
+    def _impute_train_test(self, X_train, X_test):
+        """Fill missing values using TRAIN-set statistics only (prevents test leakage).
+
+        The fill value (median or mean) is computed exclusively on the training split
+        and then applied to both train and test, so no test-set information leaks into
+        the training data through imputation.
+        """
+        X_train = X_train.copy()
+        X_test = X_test.copy()
+        numeric_cols = X_train.select_dtypes(include=['float64', 'int64']).columns
+        if self.fill_missing_with_median:
+            fill_values = X_train[numeric_cols].median()
+        else:
+            fill_values = X_train[numeric_cols].mean()
+        X_train[numeric_cols] = X_train[numeric_cols].fillna(fill_values)
+        X_test[numeric_cols] = X_test[numeric_cols].fillna(fill_values)
+        return X_train, X_test
 
     def load_and_prepare_data(self):
         try:
@@ -79,26 +127,19 @@ class DataProcessor:
         if speed_col in self.df.columns:
             self.df = self.df[self.df[speed_col] >= DataConfig.MIN_SPEED]
 
-        numeric_cols = self.df.select_dtypes(include=['float64', 'int64']).columns
         self._drop_all_nan_numeric_columns()
-        numeric_cols = self.df.select_dtypes(include=['float64', 'int64']).columns
-        if self.fill_missing_with_median:
-            self.df[numeric_cols] = self.df[numeric_cols].fillna(self.df[numeric_cols].median())
-        else:
-            self.df[numeric_cols] = self.df[numeric_cols].fillna(self.df[numeric_cols].mean())
 
         X = self.df.drop(self.target_column, axis=1)
         y = self.df[[self.target_column]]
 
-        X_unscaled = X.copy()
-        y_unscaled = y.copy()
-
+        # Split BEFORE imputation so train-set medians don't see the test rows.
         X_train_unscaled, X_test_unscaled, y_train_unscaled, y_test_unscaled = train_test_split(
-            X_unscaled, y_unscaled,
+            X, y,
             test_size=self.test_size,
             random_state=self.random_state,
             shuffle=False,
         )
+        X_train_unscaled, X_test_unscaled = self._impute_train_test(X_train_unscaled, X_test_unscaled)
 
         self.scaler_X.fit(X_train_unscaled)
         X_train_scaled = self.scaler_X.transform(X_train_unscaled)
@@ -108,8 +149,8 @@ class DataProcessor:
         y_train_scaled = self.scaler_y.transform(y_train_unscaled)
         y_test_scaled = self.scaler_y.transform(y_test_unscaled)
 
-        X_train = pd.DataFrame(X_train_scaled, columns=X_unscaled.columns)
-        X_test = pd.DataFrame(X_test_scaled, columns=X_unscaled.columns)
+        X_train = pd.DataFrame(X_train_scaled, columns=X.columns)
+        X_test = pd.DataFrame(X_test_scaled, columns=X.columns)
 
         y_train = pd.Series(y_train_scaled.flatten(), name=self.target_column)
         y_test = pd.Series(y_test_scaled.flatten(), name=self.target_column)
@@ -202,15 +243,14 @@ class DataProcessor:
         if speed_col in self.df.columns:
             self.df = self.df[self.df[speed_col] >= DataConfig.MIN_SPEED]
 
-        numeric_cols = self.df.select_dtypes(include=['float64', 'int64']).columns
         self._drop_all_nan_numeric_columns()
-        numeric_cols = self.df.select_dtypes(include=['float64', 'int64']).columns
-        if self.fill_missing_with_median:
-            self.df[numeric_cols] = self.df[numeric_cols].fillna(self.df[numeric_cols].median())
-        else:
-            self.df[numeric_cols] = self.df[numeric_cols].fillna(self.df[numeric_cols].mean())
 
-        # Compute dt (seconds) and acceleration dV/dt (m/s^2)
+        # Compute dt (seconds) and acceleration dV/dt (m/s^2) from the full sorted
+        # series. The >= MIN_POWER / >= MIN_SPEED filters above already removed rows
+        # with NaN power/speed, so the speed used here is clean and these meta columns
+        # do not require imputation. They are kept for sequence gap detection and
+        # transient-regime analysis, but are excluded from the model features (see
+        # split_calm_weather_indices / META_COLUMNS).
         knots_to_ms = 0.51444
         time_series = self.df[time_col]
         dt_seconds = time_series.diff().dt.total_seconds().values
@@ -230,15 +270,14 @@ class DataProcessor:
         X = self.df.drop(self.target_column, axis=1)
         y = self.df[[self.target_column]]
 
-        X_unscaled = X.copy()
-        y_unscaled = y.copy()
-
+        # Split BEFORE imputation so train-set medians don't see the test rows.
         X_train_unscaled, X_test_unscaled, y_train_unscaled, y_test_unscaled = train_test_split(
-            X_unscaled, y_unscaled,
+            X, y,
             test_size=self.test_size,
             random_state=self.random_state,
             shuffle=False,
         )
+        X_train_unscaled, X_test_unscaled = self._impute_train_test(X_train_unscaled, X_test_unscaled)
 
         self.scaler_X.fit(X_train_unscaled)
         X_train_scaled = self.scaler_X.transform(X_train_unscaled)
@@ -248,8 +287,8 @@ class DataProcessor:
         y_train_scaled = self.scaler_y.transform(y_train_unscaled)
         y_test_scaled = self.scaler_y.transform(y_test_unscaled)
 
-        X_train = pd.DataFrame(X_train_scaled, columns=X_unscaled.columns)
-        X_test = pd.DataFrame(X_test_scaled, columns=X_unscaled.columns)
+        X_train = pd.DataFrame(X_train_scaled, columns=X.columns)
+        X_test = pd.DataFrame(X_test_scaled, columns=X.columns)
 
         y_train = pd.Series(y_train_scaled.flatten(), name=self.target_column)
         y_test = pd.Series(y_test_scaled.flatten(), name=self.target_column)
