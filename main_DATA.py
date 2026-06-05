@@ -14,7 +14,8 @@ from base_model import BaseModel
 class DataDrivenModel(BaseModel):
     """Pure data-driven model: standard MLP with MSE/MAE loss, no physics."""
 
-    def train(self, train_loader, val_loader=None, live_plot=False, checkpoint_path=None):
+    def train(self, train_loader, val_loader=None, live_plot=False, checkpoint_path=None,
+              history_csv=None):
         optimizer = self.get_optimizer()
         loss_function = self.get_loss_function()
 
@@ -102,6 +103,17 @@ class DataDrivenModel(BaseModel):
             plt.ioff()
             plt.show()
             fig.savefig('training_validation_loss_plot_DATA.png')
+
+        if history_csv is not None:
+            import csv, os
+            os.makedirs(os.path.dirname(history_csv) or ".", exist_ok=True)
+            with open(history_csv, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["epoch", "train_loss", "val_loss"])
+                for i, tr in enumerate(train_losses):
+                    vl = val_losses[i] if i < len(val_losses) else None
+                    w.writerow([i + 1, tr, "" if vl is None else vl])
+            print(f"Saved training history -> {history_csv}")
 
         if best_state is not None:
             self.model.load_state_dict(best_state)

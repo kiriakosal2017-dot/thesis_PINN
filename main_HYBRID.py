@@ -193,7 +193,7 @@ class UnifiedPhysicsHybridModel(BaseModel):
         return torch.mean((out - scaled_zero) ** 2)
 
     def train(self, train_loader, X_train_unscaled, feature_indices, data_processor,
-              val_loader=None, checkpoint_path=None):
+              val_loader=None, checkpoint_path=None, history_csv=None):
         optimizer = self.get_optimizer()
         loss_fn = self.get_loss_function()
 
@@ -202,6 +202,7 @@ class UnifiedPhysicsHybridModel(BaseModel):
         patience = TrainingConfig.EARLY_STOPPING_PATIENCE
         min_delta = TrainingConfig.EARLY_STOPPING_MIN_DELTA
         epochs_wo = 0
+        train_losses, val_losses = [], []
 
         for epoch in range(self.epochs):
             self.model.train()
@@ -256,6 +257,9 @@ class UnifiedPhysicsHybridModel(BaseModel):
                 val_cur = v / len(val_loader)
                 print(f"Epoch {epoch+1}: train_total={run_total/max(total_batches,1):.6f}, val_data={val_cur:.6f}")
 
+            train_losses.append(run_total / max(total_batches, 1))
+            val_losses.append(val_cur)
+
             if val_cur is not None:
                 if (best_val - val_cur) > min_delta:
                     best_val = val_cur
@@ -272,6 +276,17 @@ class UnifiedPhysicsHybridModel(BaseModel):
         if best_state is not None:
             self.model.load_state_dict(best_state)
             print(f"Restored best HYBRID model (val_data={best_val:.6f})")
+
+        if history_csv is not None:
+            import csv, os
+            os.makedirs(os.path.dirname(history_csv) or ".", exist_ok=True)
+            with open(history_csv, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["epoch", "train_loss", "val_loss"])
+                for i, tr in enumerate(train_losses):
+                    vl = val_losses[i] if i < len(val_losses) else None
+                    w.writerow([i + 1, tr, "" if vl is None else vl])
+            print(f"Saved training history -> {history_csv}")
 
     def cross_validate(self, X, X_unscaled, y, feature_indices, data_processor, k_folds=5):
         kf = KFold(n_splits=k_folds, shuffle=True, random_state=DataConfig.RANDOM_STATE)

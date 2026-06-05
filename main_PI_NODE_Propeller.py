@@ -403,8 +403,9 @@ class PINODEPropellerModel:
         y_std = torch.tensor(scaler.scale_[0], dtype=torch.float32, device=self.device)
         return (P_pred_kW - y_mean) / y_std
 
-    def train(self, train_loader, val_loader=None, live_plot=False, 
-              metrics_output_path=None, checkpoint_path="best_model_PI_NODE_Propeller.pt"):
+    def train(self, train_loader, val_loader=None, live_plot=False,
+              metrics_output_path=None, checkpoint_path="best_model_PI_NODE_Propeller.pt",
+              history_csv=None):
         optimizer = self.get_optimizer()
         loss_function = self.get_loss_function()
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -415,7 +416,7 @@ class PINODEPropellerModel:
             min_lr=self.lr * 0.05,
         )
 
-        train_losses, val_losses = [], []
+        train_losses, val_losses, val_rmses = [], [], []
         best_state = None
         best_val_loss = float("inf")
         epochs_without_improvement = 0
@@ -503,6 +504,7 @@ class PINODEPropellerModel:
             if val_loader is not None:
                 val_loss, val_rmse = self.evaluate_loader(val_loader)
                 val_losses.append(val_loss)
+                val_rmses.append(val_rmse)
                 scheduler.step(val_loss)
                 current_lr = optimizer.param_groups[0]['lr']
                 print(f"Epoch {epoch+1} | Train Loss: {avg_train_loss:.4f} | Val Loss: {val_loss:.4f} | Val RMSE: {val_rmse:.2f} kW")
@@ -539,7 +541,20 @@ class PINODEPropellerModel:
 
         if best_state is not None:
             self.model.load_state_dict(best_state)
-            
+
+        if history_csv is not None:
+            import csv, os
+            os.makedirs(os.path.dirname(history_csv) or ".", exist_ok=True)
+            with open(history_csv, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["epoch", "train_loss", "val_loss", "val_rmse"])
+                for i, tr in enumerate(train_losses):
+                    vl = val_losses[i] if i < len(val_losses) else None
+                    vr = val_rmses[i] if i < len(val_rmses) else None
+                    w.writerow([i + 1, tr, "" if vl is None else vl,
+                                "" if vr is None else vr])
+            print(f"Saved training history -> {history_csv}")
+
         if live_plot:
             plt.ioff()
             plt.close()

@@ -93,10 +93,22 @@ def main():
     results_dir.mkdir(exist_ok=True)
     out_csv = results_dir / "ablation_results.csv"
 
+    # Resume: keep any configs already recorded in the CSV and skip re-running them.
     rows = []
+    done = set()
+    if out_csv.exists():
+        with open(out_csv, newline="") as f:
+            rows = list(csv.DictReader(f))
+        done = {r["config"] for r in rows}
+        if done:
+            print(f"Resuming — already done: {sorted(done)}; will skip these.")
+
     for name in args.configs:
         if name not in CONFIGS:
             raise SystemExit(f"Unknown config '{name}'. Choices: {list(CONFIGS)}")
+        if name in done:
+            print(f"[skip] {name} already in {out_csv}")
+            continue
         rows.append(run_config(name, CONFIGS[name], args.epochs, results_dir))
 
         # Write incrementally so partial progress survives an interruption.

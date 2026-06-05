@@ -72,6 +72,7 @@ def main():
         val_loader=val_loader,
         live_plot=False,
         checkpoint_path="best_model_PI_NODE_danae.pt",
+        history_csv="results/history/PI_NODE_danae.csv",
     )
 
     print("\nEvaluating on Test Set...")

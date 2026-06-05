@@ -33,12 +33,24 @@ def main():
     results_dir.mkdir(exist_ok=True)
     out_csv = results_dir / "multiseed_results.csv"
 
+    # Resume: keep seeds already recorded in the CSV and skip re-running them.
+    rows = []
+    done = set()
+    if out_csv.exists():
+        with open(out_csv, newline="") as f:
+            rows = list(csv.DictReader(f))
+        done = {int(r["seed"]) for r in rows}
+        if done:
+            print(f"Resuming — seeds already done: {sorted(done)}; will skip these.")
+
     # Data/sequences are identical across seeds — load once.
     proc, feature_indices, calm_idx, weather_idx, train_tuple, test_tuple = \
         load_danae_temporal_sequences()
 
-    rows = []
     for seed in args.seeds:
+        if seed in done:
+            print(f"[skip] seed {seed} already in {out_csv}")
+            continue
         print("\n" + "=" * 70)
         print(f"SEED {seed}")
         print("=" * 70)
@@ -77,8 +89,8 @@ def main():
             writer.writeheader()
             writer.writerows(rows)
 
-    rmses = np.array([r["test_rmse_kw"] for r in rows])
-    mapes = np.array([r["test_mape_pct"] for r in rows])
+    rmses = np.array([float(r["test_rmse_kw"]) for r in rows])
+    mapes = np.array([float(r["test_mape_pct"]) for r in rows])
     print("\n" + "=" * 70)
     print(f"MULTI-SEED SUMMARY ({len(rows)} seeds)")
     print("=" * 70)

@@ -36,7 +36,7 @@ def main():
     val_loader_tab = DataLoader(TensorDataset(X_tr_tab_t[-n_val_tab:], y_tr_tab_t[-n_val_tab:]), batch_size=64)
     train_loader_tab_sub = DataLoader(TensorDataset(X_tr_tab_t[:-n_val_tab], y_tr_tab_t[:-n_val_tab]), batch_size=64, shuffle=True)
     
-    data_model.train(train_loader_tab_sub, val_loader=val_loader_tab, live_plot=False, checkpoint_path="best_model_DATA_danae.pt")
+    data_model.train(train_loader_tab_sub, val_loader=val_loader_tab, live_plot=False, checkpoint_path="best_model_DATA_danae.pt", history_csv="results/history/DATA_danae.csv")
     
     print("\nEvaluating DATA Model on Test Set...")
     data_model.evaluate(X_test_tab, y_test_tab, dataset_type="Test", data_processor=proc_tabular)
@@ -77,7 +77,8 @@ def main():
         feature_indices=hybrid_feature_indices,
         data_processor=proc_tabular,
         val_loader=val_loader_hybrid,
-        checkpoint_path="best_model_HYBRID_danae.pt"
+        checkpoint_path="best_model_HYBRID_danae.pt",
+        history_csv="results/history/HYBRID_danae.csv"
     )
     
     print("\nEvaluating HYBRID Model on Test Set...")
