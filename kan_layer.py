@@ -30,6 +30,10 @@ class KANLinear(nn.Module):
         self.scale_spline = scale_spline
 
         h = (grid_range[1] - grid_range[0]) / grid_size
+        if h <= 0:
+            raise ValueError(
+                f"grid spacing must be positive; got grid_range={grid_range}, grid_size={grid_size}"
+            )
         grid = (
             (torch.arange(-spline_order, grid_size + spline_order + 1) * h + grid_range[0])
             .expand(in_features, -1)
@@ -47,14 +51,14 @@ class KANLinear(nn.Module):
     def reset_parameters(self, scale_noise):
         nn.init.kaiming_uniform_(self.base_weight, a=math.sqrt(5) * self.scale_base)
         with torch.no_grad():
+            # interior knots, shape (grid_size + 1, in_features)
+            interior_grid = self.grid.T[self.spline_order : -self.spline_order]
             noise = (
                 (torch.rand(self.grid_size + 1, self.in_features, self.out_features) - 0.5)
                 * scale_noise
                 / self.grid_size
-            )
-            coeff = self._curve2coeff(
-                self.grid.T[self.spline_order : -self.spline_order], noise
-            )
+            ).to(self.grid.device)
+            coeff = self._curve2coeff(interior_grid, noise)
             self.spline_weight.data.copy_(self.scale_spline * coeff)
 
     def b_splines(self, x):
@@ -95,6 +99,10 @@ class KAN(nn.Module):
 
     def __init__(self, layers_hidden, grid_size=5, spline_order=3):
         super().__init__()
+        if len(layers_hidden) < 2:
+            raise ValueError(
+                f"layers_hidden must list at least [in, out]; got {layers_hidden}"
+            )
         self.layers = nn.ModuleList(
             KANLinear(in_f, out_f, grid_size=grid_size, spline_order=spline_order)
             for in_f, out_f in zip(layers_hidden, layers_hidden[1:])
