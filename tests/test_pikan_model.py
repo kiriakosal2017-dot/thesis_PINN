@@ -1,4 +1,4 @@
-"""Smoke test: PIKANModel reuses HYBRID physics with a KAN backbone (no pytest)."""
+"""Smoke test: PIKANModel reuses HYBRID physics with a KAN backbone (run standalone or via pytest)."""
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch

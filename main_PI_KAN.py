@@ -37,6 +37,16 @@ class PIKANModel(UnifiedPhysicsHybridModel):
     def n_params(self):
         return sum(p.numel() for p in self.model.parameters() if p.requires_grad)
 
+    def cross_validate(self, *args, **kwargs):
+        # Inherited cross_validate relies on BaseModel.reset_weights, which only
+        # resets nn.Linear layers and would NOT reset the KAN backbone between
+        # folds. The PI-KAN comparison uses a single chronological train/val split
+        # (see evaluate_pikan.py / train_multiseed_pikan.py), not k-fold CV.
+        raise NotImplementedError(
+            "cross_validate is not supported for PIKANModel (reset_weights does not "
+            "reset KAN layers). Use a single chronological train/val split instead."
+        )
+
 
 if __name__ == "__main__":
     dp = DataProcessor()
