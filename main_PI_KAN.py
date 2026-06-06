@@ -24,7 +24,7 @@ class PIKANModel(UnifiedPhysicsHybridModel):
             optimizer_choice=optimizer_choice, loss_function_choice=loss_function_choice,
             alpha=alpha, beta=beta, gamma=gamma, delta=delta,
         )
-        self.kan_width = kan_width or [input_size, 16, 1]
+        self.kan_width = kan_width or [input_size, 64, 32, 1]
         if self.kan_width[0] != input_size or self.kan_width[-1] != 1:
             raise ValueError(
                 f"kan_width must start with input_size={input_size} and end with 1; "
@@ -49,7 +49,7 @@ if __name__ == "__main__":
     in_size = X_train.shape[1]
     model = PIKANModel(
         input_size=in_size,
-        kan_width=[in_size, 16, 1],
+        kan_width=[in_size, 64, 32, 1],
         lr=1e-3,
         epochs=TrainingConfig.EPOCHS_FINAL,
         batch_size=64,
