@@ -1,0 +1,47 @@
+"""Smoke tests for the self-contained B-spline KAN (no pytest; run directly)."""
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import torch
+from kan_layer import KAN, KANLinear
+
+
+def test_forward_shape():
+    net = KAN([7, 16, 1], grid_size=5, spline_order=3)
+    x = torch.randn(32, 7)
+    y = net(x)
+    assert y.shape == (32, 1), f"expected (32,1), got {tuple(y.shape)}"
+
+
+def test_first_order_grad_flows():
+    net = KAN([7, 16, 1])
+    x = torch.randn(8, 7, requires_grad=True)
+    y = net(x).sum()
+    g = torch.autograd.grad(y, x, create_graph=True)[0]
+    assert g.shape == x.shape
+    assert torch.isfinite(g).all(), "non-finite first-order grad"
+
+
+def test_second_order_grad_flows():
+    # compute_pde_residual takes d/dx with create_graph=True then backprops again
+    net = KAN([7, 16, 1])
+    x = torch.randn(8, 7, requires_grad=True)
+    out = net(x)
+    g = torch.autograd.grad(out, x, grad_outputs=torch.ones_like(out),
+                            create_graph=True)[0]
+    loss = (g ** 2).mean()
+    loss.backward()  # 2nd-order path; must not raise
+    assert net.layers[0].spline_weight.grad is not None, "no grad on spline_weight"
+
+
+def test_params_present_and_trainable():
+    layer = KANLinear(7, 16)
+    n = sum(p.numel() for p in layer.parameters() if p.requires_grad)
+    assert n > 0
+
+
+if __name__ == "__main__":
+    test_forward_shape()
+    test_first_order_grad_flows()
+    test_second_order_grad_flows()
+    test_params_present_and_trainable()
+    print("ALL KAN LAYER SMOKE TESTS PASSED")
