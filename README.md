@@ -337,7 +337,7 @@ Each prints a pass line on success and raises on failure.
 
 ## 11. Acknowledgments
 
-Special thanks to Christoforos Rekatsinas (Ph.D.) for his guidance and support.
+Special thanks to Christoforos Rekatsinas (Ph.D.) for his guidance and to Pariotis Efthimios / Leligkou Eleni Aikaterini for their support.
 
 ## 12. Contact
 
