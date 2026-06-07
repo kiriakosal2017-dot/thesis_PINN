@@ -146,22 +146,22 @@ TRANSIENT = {  # model: (steady_rmse, trans_rmse, steady_mape, trans_mape)
 }
 
 # F4 zero-shot transfer MAPE (%) per target vessel
-TRANSFER = {  # ship: {model: mape}
-    "KASTOR":   {"PI-NODE": 3.75,  "DATA": 9.47,  "HYBRID": 23.46},
-    "MENELAOS": {"PI-NODE": 4.87,  "DATA": 39.72, "HYBRID": 35.05},
-    "THALIA":   {"PI-NODE": 27.72, "DATA": 41.55, "HYBRID": 41.07},
-    "THISSEAS": {"PI-NODE": 32.19, "DATA": 88.63, "HYBRID": 77.69},
+TRANSFER = {  # vessel: {model: mape}
+    "Sister (82K)":  {"PI-NODE": 3.75,  "DATA": 9.47,  "HYBRID": 23.46},
+    "64K carrier":   {"PI-NODE": 4.87,  "DATA": 39.72, "HYBRID": 35.05},
+    "Diff. class":   {"PI-NODE": 27.72, "DATA": 41.55, "HYBRID": 41.07},
+    "75.2K":         {"PI-NODE": 32.19, "DATA": 88.63, "HYBRID": 77.69},
 }
 
 # F5 few-shot MAPE (%) by training-data fraction.  DATA vs PI-NODE.
 # A target vessel's 25% PI-NODE not yet available (run interrupted) -> None.
 FEWSHOT = {
-    "KASTOR": {
+    "Sister (82K)": {
         "frac":    [1, 5, 10, 25],
         "DATA":    [9.29, 7.85, 9.05, 7.84],
         "PI-NODE": [5.56, 2.86, 2.82, 2.74],
     },
-    "MENELAOS": {
+    "64K carrier": {
         "frac":    [1, 5, 10, 25],
         "DATA":    [5.46, 3.09, 2.71, 2.50],
         "PI-NODE": [3.97, 3.02, 2.74, 2.66],
