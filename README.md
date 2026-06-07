@@ -138,10 +138,9 @@ the backbone, so the comparison isolates the architecture.
 └── PhD/                            # Raw vessel logs and technical drawings
 ```
 
-The training runs write `best_model_DATA_danae.pt`, `best_model_HYBRID_danae.pt`, and
-`best_model_PI_NODE_danae.pt` to the repository root, the per-seed checkpoints
-`results/best_model_PI_NODE_seed{0..4}.pt` to `results/`, and the fitted scalers
-`data_processor_danae.pkl` (tabular) and `data_processor_danae_temporal.pkl` (sequenced).
+Training runs save the model checkpoints (`best_model_*.pt`) and the fitted scalers
+(`data_processor_*.pkl`) to the repository root, and the multi-seed run writes the per-seed
+checkpoints `results/best_model_PI_NODE_seed{0..4}.pt` to `results/`.
 
 ---
 
@@ -168,11 +167,11 @@ All tunable parameters live in `.env` files read by `config.py`. Start from the 
 one file per vessel, then switch the active vessel by copying its file over `.env`:
 
 ```bash
-cp .env.example .env.danae    # then edit .env.danae with the vessel's paths and constants
-cp .env.danae .env            # make DANAE the active vessel
+cp .env.example .env.source    # then edit it with the vessel's paths and constants
+cp .env.source .env            # make the source vessel active
 
-cp .env.kastor .env           # switch to another vessel
-cp .env.danae .env            # restore the source vessel
+cp .env.target .env            # switch to another vessel
+cp .env.source .env            # restore the source vessel
 ```
 
 Environment files are kept out of version control (they hold local paths and per-vessel constants);
@@ -193,9 +192,9 @@ channel is available to every model.
 
 ## 7. Dataset
 
-The source (training) vessel is **M/V DANAE**, an 82,000 DWT bulk carrier, with roughly 120,000
-usable records spanning several months of in-service operation. The target is shaft power (kW) from
-the onboard torque meter.
+The source (training) vessel is an 82,000 DWT bulk carrier, with roughly 120,000 usable records
+spanning several months of in-service operation. The target is shaft power (kW) from the onboard
+torque meter.
 
 Preprocessing happens in `read_data.py`. Port and anchor rows are filtered out (power below 1000 kW
 or speed below 4 knots). The data is split 80/20 **chronologically**, with no shuffling. Missing
@@ -209,7 +208,7 @@ transient-regime split, but they are **not** fed to the models as inputs.
 
 ## 8. Reproducing the pipeline
 
-Run from the project root with the source vessel active (`cp .env.danae .env`). The steps are
+Run from the project root with the source vessel active (`cp .env.source .env`). The steps are
 ordered, since the later ones depend on the checkpoints produced earlier.
 
 **Baselines (DATA and HYBRID).**
@@ -230,17 +229,17 @@ python -u evaluate_transient.py             # steady vs transient
 
 **Zero-shot transfer to an unseen vessel.**
 ```bash
-cp .env.kastor .env
+cp .env.target .env
 python -u evaluate_transfer.py
-cp .env.danae .env
+cp .env.source .env
 ```
 Only the propeller constants change; the weights stay frozen.
 
 **Few-shot adaptation.**
 ```bash
-cp .env.kastor .env
+cp .env.target .env
 python -u evaluate_fewshot.py
-cp .env.danae .env
+cp .env.source .env
 ```
 
 **Ablation, multi-seed, and uncertainty.**
@@ -263,7 +262,7 @@ python -u make_figures.py                   # writes results/figures/F1 to F10
 
 **Adding a new vessel.**
 ```bash
-python prepare_ship_data.py kastor          # merge raw logs into the common schema
+python prepare_ship_data.py <vessel>        # merge raw logs into the common schema
 ```
 
 ---
@@ -272,7 +271,7 @@ python prepare_ship_data.py kastor          # merge raw logs into the common sch
 
 All figures are written to `results/figures/` (`F1` to `F10`).
 
-**Source domain (DANAE).**
+**Source domain (source vessel).**
 
 | Model | Test RMSE (kW) | vs DATA | Description |
 |---|---:|---|---|
@@ -286,25 +285,24 @@ about 3.5 %); the 312.52 figure is the single canonical run. DATA and HYBRID are
 the same protocol. The HYBRID number is the key negative finding: soft hull-physics buys nothing
 over plain data, which is exactly what motivates moving the physics to the propeller.
 
-**Head-to-head vs PI-KAN.** Trained on DANAE under an identical protocol (same split, features,
-physics, and five seeds), PI-KAN reaches 471.04 ± 72.80 kW. It is a serious competitor, since it
-beats both DATA and HYBRID, but PI-NODE still wins by **39 % in RMSE** and is about **seven times
-more stable across seeds**. The Camp-A "B-series-ML" surrogates from the literature predict
-open-water `K_T`/`K_Q` rather than operational power, so they belong here as a contextual contrast
-rather than a trained baseline.
+**Head-to-head vs PI-KAN.** Trained on the source vessel under an identical protocol (same split,
+features, physics, and five seeds), PI-KAN reaches 471.04 ± 72.80 kW. It is a serious competitor,
+since it beats both DATA and HYBRID, but PI-NODE still wins by **39 % in RMSE** and is about
+**seven times more stable across seeds**. The Camp-A "B-series-ML" surrogates from the literature
+predict open-water `K_T`/`K_Q` rather than operational power, so they belong here as a contextual
+contrast rather than a trained baseline.
 
-**Zero-shot transfer (trained on DANAE, no retraining), MAPE.**
+**Zero-shot transfer (trained on the source vessel, no retraining), MAPE.**
 
 | Target vessel | PI-NODE | DATA | HYBRID |
 |---|---:|---:|---:|
-| KASTOR (sister, 82K) | **3.75 %** | 9.47 % | 23.46 % |
-| MENELAOS (64K) | **4.87 %** | 39.72 % | 35.05 % |
-| THALIA (different class) | **27.72 %** | 41.55 % | 41.07 % |
-| THISSEAS (75.2K) | **32.19 %** | 88.63 % | 77.69 % |
+| Sister vessel (82K) | **3.75 %** | 9.47 % | 23.46 % |
+| Smaller bulk carrier (64K) | **4.87 %** | 39.72 % | 35.05 % |
+| Different class | **27.72 %** | 41.55 % | 41.07 % |
+| Different vessel (75.2K) | **32.19 %** | 88.63 % | 77.69 % |
 
-PI-NODE has the lowest error on every unseen vessel. The high THALIA/THISSEAS numbers are reported
-openly: those vessels are further out of distribution, and PI-NODE stays first there but is not
-immune.
+PI-NODE has the lowest error on every unseen vessel. The two highest numbers come from the vessels
+that are furthest out of distribution; PI-NODE stays first there but is not immune.
 
 **Summary across studies.**
 
