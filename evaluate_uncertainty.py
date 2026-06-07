@@ -1,4 +1,4 @@
-"""Uncertainty Quantification for the PI-NODE (source domain: DANAE).
+"""Predictive uncertainty evaluation for the PI-NODE (source domain: DANAE).
 
 Two complementary estimates of predictive uncertainty:
 
@@ -26,6 +26,7 @@ from pinode_common import load_danae_temporal_sequences, make_loaders, predict_p
 
 
 def build_model(proc, feature_indices, calm_idx, weather_idx, input_size):
+    # Canonical PI-NODE architecture — shared by both the MC-Dropout and ensemble paths.
     return PINODEPropellerModel(
         input_size=input_size,
         feature_indices=feature_indices,
@@ -40,6 +41,7 @@ def build_model(proc, feature_indices, calm_idx, weather_idx, input_size):
 
 
 def load_into(model, path):
+    # weights_only=True avoids arbitrary-code execution in pickled checkpoints.
     state = torch.load(path, map_location=model.device, weights_only=True)
     model.model.load_state_dict(state)
     model.model.eval()
@@ -48,13 +50,17 @@ def load_into(model, path):
 
 def coverage(mean, std, true, z=1.96):
     """Fraction of true values within mean +/- z*std (perfectly calibrated 95% ~ 0.95)."""
+    # np.maximum guards against zero-std edge cases that would inflate coverage artificially.
     within = np.abs(true - mean) <= z * np.maximum(std, 1e-9)
     return float(within.mean())
 
 
 def report(tag, mean, std, true):
+    # Summarise a single uncertainty estimator in three complementary numbers:
+    # point-prediction quality (RMSE/MAPE), spread (mean std), and interval calibration (coverage).
     rmse, mape = rmse_mape(mean, true)
     mean_std = float(std.mean())
+    # Express spread relative to mean predicted power so it is dimensionless and comparable across ships.
     rel = mean_std / max(float(np.abs(mean).mean()), 1e-9) * 100
     cov = coverage(mean, std, true)
     print(f"\n--- {tag} ---")
@@ -86,7 +92,9 @@ def main():
     print("PI-NODE Uncertainty Quantification (DANAE test set)")
     print("=" * 70)
 
-    # 1. MC-Dropout on the single main checkpoint
+    # --- MC-Dropout on the single main checkpoint ---
+    # Dropout is left active at inference time; each of the K passes samples a different
+    # sub-network, so the spread of predictions approximates posterior predictive variance.
     model = load_into(base, args.checkpoint)
     runs = []
     for k in range(args.mc_samples):
@@ -95,7 +103,10 @@ def main():
     runs = np.stack(runs)  # (K, N)
     report(f"MC-Dropout (K={args.mc_samples})", runs.mean(0), runs.std(0), true)
 
-    # 2. Deep ensemble (optional; needs per-seed checkpoints)
+    # --- Deep ensemble (optional; needs per-seed checkpoints) ---
+    # Each member was trained from a different random seed, so inter-member disagreement
+    # captures the epistemic uncertainty that a single MC-Dropout model cannot separate from
+    # aleatoric noise.
     if args.ensemble:
         paths = sorted(glob.glob(args.ensemble_glob))
         if len(paths) < 2:

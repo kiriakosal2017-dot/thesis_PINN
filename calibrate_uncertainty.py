@@ -1,4 +1,4 @@
-"""Post-hoc recalibration of PI-NODE predictive uncertainty (step 14).
+"""Post-hoc recalibration of PI-NODE predictive uncertainty intervals.
 
 Two methods, fit on a held-out calibration split and evaluated on a disjoint half:
   * temperature scaling — Gaussian variance matching: a single scalar T = sqrt(mean((y-mu)^2/sigma^2))
@@ -26,11 +26,16 @@ SIGMA_FLOOR = 1e-6
 
 
 def _safe_sigma(sigma):
+    # Clamp sigma away from zero before it appears in a denominator.
     return np.maximum(np.asarray(sigma, dtype=float), SIGMA_FLOOR)
 
 
 def temperature_factor(resid, sigma):
-    """NLL-optimal Gaussian variance-matching scalar: T = sqrt(mean((resid/sigma)^2))."""
+    """NLL-optimal Gaussian variance-matching scalar: T = sqrt(mean((resid/sigma)^2)).
+
+    T > 1 means the raw sigma is over-confident; T < 1 means it is over-dispersed.
+    Multiplying sigma by T minimises the Gaussian NLL on the calibration set.
+    """
     z = np.asarray(resid, dtype=float) / _safe_sigma(sigma)
     return float(np.sqrt(np.mean(z ** 2)))
 
@@ -40,6 +45,9 @@ def conformal_quantile(resid, sigma, alpha):
 
     Uses the split-conformal order statistic k = ceil((n+1)(1-alpha)); returns +inf if k>n
     (calibration set too small for the requested level).
+
+    The +1 in (n+1) inflates the quantile slightly to provide exact marginal coverage for
+    exchangeable calibration/test pairs, as proven by Venn/Romano et al.
     """
     s = np.abs(np.asarray(resid, dtype=float)) / _safe_sigma(sigma)
     n = s.size
@@ -59,6 +67,7 @@ def interval_coverage_width(mu, radius, true):
 
 
 LEVELS = (0.90, 0.95)
+# Fixed seed for the calibration/evaluation split so results are reproducible across runs.
 SPLIT_SEED = 42
 
 
@@ -73,6 +82,7 @@ def _ensemble_mu_sigma(proc, fi, calm, weather, input_size, test_loader, glob_pa
         preds, true = predict_power(m, test_loader)
         runs.append(preds)
     runs = np.stack(runs)  # (M, N)
+    # Mean is the point prediction; std across members quantifies inter-model disagreement.
     return runs.mean(0), runs.std(0), true, len(paths)
 
 
@@ -86,24 +96,36 @@ def _mcdropout_mu_sigma(model, test_loader, k):
 
 
 def _evaluate_estimator(tag, mu, sigma, true, rows):
-    """Fit T and q on a random calibration half; report coverage/width on the eval half."""
+    """Fit T and q on a random calibration half; report coverage/width on the eval half.
+
+    The random 50/50 split is drawn once (SPLIT_SEED) and the same partition is reused for
+    all methods and levels, keeping comparisons fair.  Exchangeability between the two halves
+    holds because test sequences are shuffled during loading — conformal coverage guarantees
+    therefore apply.
+    """
     n = mu.size
     rng = np.random.default_rng(SPLIT_SEED)
     perm = rng.permutation(n)
+    # cal: fit T and q; ev: measure coverage (never seen during calibration fitting).
     cal, ev = perm[: n // 2], perm[n // 2:]
     resid_cal = true[cal] - mu[cal]
     sig_cal = sigma[cal]
-    T = temperature_factor(resid_cal, sig_cal)  # level-independent
+    # T is level-independent: a single scalar shifts all intervals uniformly.
+    T = temperature_factor(resid_cal, sig_cal)
     rmse, mape = rmse_mape(mu, true)
     print(f"\n=== {tag}  (RMSE {rmse:.2f} kW, MAPE {mape:.2f}%; T={T:.3f}; n_cal={cal.size}, n_eval={ev.size}) ===")
     print(f"{'level':>6} {'method':>12} {'coverage':>9} {'mean_width_kW':>14}")
     for level in LEVELS:
         alpha = 1.0 - level
         z = Z_TWO_SIDED[level]
+        # q is fitted on cal only; applying it to ev gives the formal conformal guarantee.
         q = conformal_quantile(resid_cal, sig_cal, alpha)
         radii = {
+            # raw: uncalibrated baseline — shows how far the raw sigma is from the target level.
             "raw": z * sigma[ev],
+            # temperature: parametric correction, valid when residuals are roughly Gaussian.
             "temperature": z * T * sigma[ev],
+            # conformal: distribution-free, exact marginal coverage under exchangeability.
             "conformal": q * sigma[ev],
         }
         for method, radius in radii.items():
@@ -131,16 +153,17 @@ def main():
 
     rows = []
 
-    # Deep ensemble (primary)
+    # Deep ensemble is the primary estimator — richer epistemic signal than MC-Dropout.
     mu_e, sig_e, true_e, m = _ensemble_mu_sigma(proc, fi, calm, weather, input_size,
                                                 test_loader, args.ensemble_glob)
     _evaluate_estimator(f"Deep Ensemble (M={m})", mu_e, sig_e, true_e, rows)
 
-    # MC-Dropout (secondary; same calibration machinery)
+    # MC-Dropout goes through identical calibration machinery for a direct comparison.
     model = load_into(base, args.checkpoint)
     mu_d, sig_d, true_d = _mcdropout_mu_sigma(model, test_loader, args.mc_samples)
     _evaluate_estimator(f"MC-Dropout (K={args.mc_samples})", mu_d, sig_d, true_d, rows)
 
+    # Write all rows to CSV for downstream analysis and plotting.
     out = Path("results"); out.mkdir(exist_ok=True)
     csv_path = out / "calibration_results.csv"
     with open(csv_path, "w", newline="") as f:
