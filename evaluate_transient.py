@@ -1,12 +1,6 @@
-"""Phase 3: Transient Phenomena Analysis.
-
-Evaluates all three models (DATA, HYBRID, PI-NODE) on transient vs steady-state
-subsets of the DANAE test set. Transient regions are defined as timesteps where
-the absolute acceleration (|dV/dt|) or RPM rate-of-change exceeds a threshold.
-
-Usage:
-    python -u evaluate_transient.py
-"""
+"""Split the DANAE test set into steady and transient regimes by |dV/dt| and
+compare DATA, HYBRID, and PI-NODE error on each subset to assess whether physics
+inductive bias improves robustness during non-equilibrium operating conditions."""
 import pickle
 import numpy as np
 import pandas as pd
@@ -21,18 +15,20 @@ from main_PI_NODE_Propeller import PINODEPropellerModel
 
 
 def load_data():
-    """Load both tabular (for DATA) and temporal (for PI-NODE) data."""
-    # Tabular data (for DATA model -- no dt/acceleration columns)
+    """Load both tabular (for DATA/HYBRID) and temporal (for PI-NODE) data."""
+    # Tabular branch: flat feature vectors; acceleration/dt columns are absent by design.
     proc_tab = DataProcessor()
     res_tab = proc_tab.load_and_prepare_data()
     if res_tab is None:
         raise RuntimeError("Failed to load tabular data")
     X_train_tab, X_test_tab, _, _, y_train_tab, y_test_tab, _, _ = res_tab
 
-    # Temporal data (for PI-NODE -- has dt/acceleration)
+    # RPM is normally dropped to prevent leakage; the temporal branch needs it
+    # because the ODE integrator uses rotational speed as a state variable.
     if "Propeller-Shaft-RPM" in DataConfig.DROP_COLUMNS:
         DataConfig.DROP_COLUMNS.remove("Propeller-Shaft-RPM")
 
+    # Temporal branch: includes dt and acceleration columns used by PI-NODE sequences.
     proc_temp = DataProcessor()
     res_temp = proc_temp.load_and_prepare_temporal_data()
     if res_temp is None:
@@ -44,13 +40,19 @@ def load_data():
 
 
 def identify_transient_indices(X_test_uns, percentile=75):
-    """Label each test row as transient or steady-state based on |acceleration|."""
+    """Label each test row as transient or steady-state based on |dV/dt|.
+
+    The threshold is data-driven (a percentile of the test set's acceleration
+    distribution) rather than a fixed physical constant, which keeps the
+    comparison balanced across different vessel speed ranges.
+    """
     accel_col = "acceleration"
     if accel_col not in X_test_uns.columns:
         raise ValueError("acceleration column not found in unscaled test data")
 
     accel = X_test_uns[accel_col].values
     abs_accel = np.abs(accel)
+    # Rows at or above this percentile are treated as transient; the rest are steady.
     threshold = np.percentile(abs_accel, percentile)
 
     transient_mask = abs_accel >= threshold
@@ -76,7 +78,8 @@ def evaluate_data_model(X_test_tab, y_test_tab, proc_tab, transient_mask):
     preds_kw = proc_tab.inverse_transform_y(preds_scaled)
     true_kw = proc_tab.inverse_transform_y(y_test_tab.values.reshape(-1, 1))
 
-    # Align mask: tabular test set may differ in size from temporal test set
+    # The tabular and temporal processors may yield slightly different row counts
+    # (e.g. due to NaN dropping); trim or pad the mask accordingly.
     mask = transient_mask[:len(preds_kw)] if len(transient_mask) >= len(preds_kw) else np.pad(transient_mask, (0, len(preds_kw) - len(transient_mask)), constant_values=False)
 
     return compute_rmse_split(preds_kw, true_kw, mask, "DATA")
@@ -84,7 +87,9 @@ def evaluate_data_model(X_test_tab, y_test_tab, proc_tab, transient_mask):
 
 def evaluate_hybrid_model(X_test_tab, y_test_tab, proc_tab, transient_mask):
     """Evaluate the saved HYBRID model on transient and steady subsets.
-    At inference time, HYBRID is just an MLP (same as DATA) -- physics only affects training.
+
+    At inference, HYBRID is architecturally identical to DATA — the physics
+    regularisation only alters the training loss, not the forward pass.
     """
     print("\n--- HYBRID Model ---")
     input_size = X_test_tab.shape[1]
@@ -131,6 +136,8 @@ def evaluate_pinode_model(proc, X_train, X_test, X_train_uns, X_test_uns, y_trai
     model.model.load_state_dict(state)
     model.model.eval()
 
+    # shuffle=False is mandatory: the transient mask is positionally aligned to the
+    # original time-sorted test set, so reordering rows would corrupt the split.
     loader = model.prepare_sequence_dataloader(X_te_seq, X_te_uns_seq, y_te_seq, shuffle=False)
 
     all_preds, all_true = [], []
@@ -139,6 +146,8 @@ def evaluate_pinode_model(proc, X_train, X_test, X_train_uns, X_test_uns, y_trai
             X_batch = X_batch.to(model.device)
             X_uns_batch = X_uns_batch.to(model.device)
             w, t, eta_r = model.model(X_batch)
+            # The analytical power formula reads physical quantities (speed, density)
+            # from the last timestep of each window (the prediction target's instant).
             X_uns_last = X_uns_batch[:, -1, :]
             P_kw, _, _, _, _ = model.compute_analytical_power(w, t, eta_r, X_uns_last)
             all_preds.append(P_kw.cpu().numpy())
@@ -148,7 +157,8 @@ def evaluate_pinode_model(proc, X_train, X_test, X_train_uns, X_test_uns, y_trai
     preds_kw = np.concatenate(all_preds).reshape(-1)
     true_kw = np.concatenate(all_true).reshape(-1)
 
-    # Sequences lose (seq_len - 1) rows from the start; align the transient mask
+    # Sliding windows consume the first (seq_len - 1) rows as context, so prediction
+    # index 0 corresponds to original row (seq_len - 1).  Offset the mask to match.
     seq_mask = transient_mask[seq_len - 1:]
     if len(seq_mask) > len(preds_kw):
         seq_mask = seq_mask[:len(preds_kw)]
@@ -168,6 +178,8 @@ def compute_rmse_split(preds, true, mask, model_name):
     rmse_steady = np.sqrt(np.mean((preds[~mask] - true[~mask]) ** 2))
     rmse_transient = np.sqrt(np.mean((preds[mask] - true[mask]) ** 2))
 
+    # Clamp the denominator to 100 kW to prevent division instability at near-zero
+    # power values (e.g. during slow manoeuvring), which would inflate MAPE artificially.
     safe_true = np.where(np.abs(true) > 100, true, 100.0)
     mape_all = np.mean(np.abs((preds - true) / safe_true)) * 100
     mape_steady = np.mean(np.abs((preds[~mask] - true[~mask]) / safe_true[~mask])) * 100
