@@ -189,11 +189,19 @@ python prepare_ship_data.py kastor   # merge raw CSVs into DANAE's schema
 | Model   | Test RMSE (kW) | vs DATA  | Description |
 |---------|---------------:|----------|-------------|
 | **PI-NODE** | **312.52** | **−43.9%** | Grey-box: Neural ODE + hard propeller physics |
+| PI-KAN  | 471.04 ± 72.80 | −15.5%   | Physics-informed KAN (soft hull-physics + KAN backbone), 5-seed |
 | DATA    | 557.52         | baseline | Black-box MLP |
 | HYBRID  | 583.88         | +4.7%    | Soft-physics MLP + ITTC-78 penalties |
 
 > PI-NODE multi-seed estimate: **286.42 ± 9.89 kW** over 5 seeds (CV ≈ 3.5%) — the 312.52 single
 > run is one member of that distribution. DATA/HYBRID are single runs under the same protocol.
+>
+> **Head-to-head vs a physics-informed KAN (step 13):** trained on DANAE under the identical
+> protocol (same split/features/physics, 5 seeds), PI-KAN reaches **471.04 ± 72.80 kW** — a strong
+> competitor that beats DATA and HYBRID, yet PI-NODE still wins by **−39% RMSE** (286.42 vs 471.04)
+> and is **7× more seed-stable**. PI-KAN is trained on CPU (Apple-MPS miscomputes the KAN B-spline
+> double-backward). Camp-A "B-series-ML" surrogates predict open-water K_T/K_Q, not operational
+> power, so they are a literature contrast, not a trained baseline. See `docs/PAPER_FINDINGS.md` §9.
 
 **Zero-shot transfer (trained on DANAE, no retraining), MAPE:**
 

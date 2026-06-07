@@ -32,7 +32,11 @@ class PIKANModel(UnifiedPhysicsHybridModel):
         # collapses training to a near-constant (mean-power) predictor. The CPU path is
         # numerically correct, so PI-KAN trains on CPU by default. (The MLP-based HYBRID
         # is unaffected and still uses the accelerator.)
-        if force_cpu:
+        if force_cpu and self.device.type != "cpu":
+            print(f"PI-KAN: overriding {self.device.type.upper()} -> CPU "
+                  "(MPS miscomputes the KAN B-spline double-backward)")
+            self.device = torch.device("cpu")
+        elif force_cpu:
             self.device = torch.device("cpu")
         # BaseModel.__init__ called set_global_seed(RANDOM_STATE), overriding any caller
         # seed. Re-seed HERE (after super, before building the KAN) so multi-seed runs
