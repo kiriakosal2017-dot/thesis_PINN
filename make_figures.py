@@ -181,6 +181,13 @@ UQ = [  # (method, rmse_kw, mean_std_kw, coverage95_pct)
     ("Deep Ensemble\n(M=5)", 278.36, 62.13, 51.4),
 ]
 
+# F10 calibration (DANAE test eval-half) — source: results/calibration_results.csv (step 14)
+# Deep-Ensemble empirical coverage per method at each target level.
+CALIBRATION = {
+    0.90: {"raw": 0.4524, "temperature": 0.9566, "conformal": 0.9078},
+    0.95: {"raw": 0.5150, "temperature": 0.9662, "conformal": 0.9548},
+}
+
 
 # --------------------------------------------------------------------------- #
 # Figures
@@ -357,6 +364,31 @@ def fig_uncertainty():
     save(fig, "F9_uncertainty")
 
 
+def fig_calibration():
+    """F10: empirical coverage before/after recalibration (Deep Ensemble)."""
+    methods = ["raw", "temperature", "conformal"]
+    colors = {"raw": "#b2182b", "temperature": "#f1a340", "conformal": "#1b7837"}
+    levels = [0.90, 0.95]
+    fig, ax = plt.subplots(figsize=(7, 4))
+    x = range(len(levels))
+    w = 0.25
+    for j, m in enumerate(methods):
+        vals = [CALIBRATION[l][m] * 100 for l in levels]
+        offs = (j - 1) * w
+        bars = ax.bar([i + offs for i in x], vals, w, label=m, color=colors[m])
+        for b, v in zip(bars, vals):
+            ax.text(b.get_x() + b.get_width() / 2, v + 1, f"{v:.0f}", ha="center", fontsize=8)
+    for l in levels:
+        ax.axhline(l * 100, ls="--", color="#555555", lw=1)
+    ax.set_xticks(list(x))
+    ax.set_xticklabels([f"{int(l*100)}% target" for l in levels])
+    ax.set_ylabel("Empirical coverage (%)")
+    ax.set_ylim(0, 105)
+    ax.set_title("Predictive-interval calibration (Deep Ensemble, DANAE)")
+    ax.legend(title="method")
+    save(fig, "F10_calibration")
+
+
 # --------------------------------------------------------------------------- #
 if __name__ == "__main__":
     print("Generating paper figures -> results/figures/ (PDF + PNG)")
@@ -368,4 +400,5 @@ if __name__ == "__main__":
     fig_ablation()
     fig_multiseed()
     fig_uncertainty()
+    fig_calibration()
     print("Done.")
