@@ -26,7 +26,7 @@ import matplotlib.pyplot as plt
 FIG_DIR = "results/figures"
 HIST_DIR = "results/history"
 
-COLORS = {"PI-NODE": "#1b7837", "DATA": "#2166ac", "HYBRID": "#b2182b"}
+COLORS = {"PI-NODE": "#1b7837", "PI-KAN": "#762a83", "DATA": "#2166ac", "HYBRID": "#b2182b"}
 ORDER = ["PI-NODE", "DATA", "HYBRID"]
 
 plt.rcParams.update({
@@ -125,8 +125,12 @@ def get_loss_history(model):
 # --------------------------------------------------------------------------- #
 # Numeric tables (provenance: docs/EXPERIMENT_RUNBOOK.md + re-run logs)
 # --------------------------------------------------------------------------- #
-# F2 source-domain test RMSE (kW) on DANAE
-SOURCE_RMSE = {"PI-NODE": 312.52, "DATA": 557.52, "HYBRID": 583.88}
+# F2 source-domain test RMSE (kW) on DANAE.
+# PI-NODE/DATA/HYBRID are canonical single runs; PI-KAN is the 5-seed mean (±std drawn
+# as an error bar) from results/multiseed_pikan_results.csv (step 13).
+SOURCE_RMSE = {"PI-NODE": 312.52, "PI-KAN": 471.04, "DATA": 557.52, "HYBRID": 583.88}
+SOURCE_ORDER = ["PI-NODE", "PI-KAN", "DATA", "HYBRID"]
+SOURCE_RMSE_ERR = {"PI-KAN": 72.80}  # 5-seed std; others are single runs (no CI)
 
 # F3 transient analysis (P75 |dV/dt| threshold)
 TRANSIENT = {  # model: (steady_rmse, trans_rmse, steady_mape, trans_mape)
@@ -206,16 +210,20 @@ def fig_loss_curves():
 
 
 def fig_source_rmse():
-    """F2: source-domain test RMSE bars."""
-    fig, ax = plt.subplots(figsize=(5.5, 4))
-    vals = [SOURCE_RMSE[m] for m in ORDER]
-    bars = ax.bar(ORDER, vals, color=[COLORS[m] for m in ORDER], width=0.6)
-    for b, v in zip(bars, vals):
-        ax.text(b.get_x() + b.get_width() / 2, v + 8, f"{v:.0f}",
-                ha="center", va="bottom", fontsize=10)
+    """F2: source-domain test RMSE bars (incl. the step-13 PI-KAN competitor)."""
+    fig, ax = plt.subplots(figsize=(6.5, 4))
+    vals = [SOURCE_RMSE[m] for m in SOURCE_ORDER]
+    errs = [SOURCE_RMSE_ERR.get(m, 0.0) for m in SOURCE_ORDER]
+    bars = ax.bar(SOURCE_ORDER, vals, color=[COLORS[m] for m in SOURCE_ORDER],
+                  width=0.62, yerr=errs, capsize=4,
+                  error_kw={"ecolor": "#333333", "elinewidth": 1.2})
+    for b, v, e in zip(bars, vals, errs):
+        label = f"{v:.0f}" + (f"±{e:.0f}" if e else "")
+        ax.text(b.get_x() + b.get_width() / 2, v + e + 8, label,
+                ha="center", va="bottom", fontsize=9)
     ax.set_ylabel("Test RMSE (kW)")
     ax.set_title("Source-domain accuracy (DANAE)")
-    ax.set_ylim(0, max(vals) * 1.15)
+    ax.set_ylim(0, max(v + e for v, e in zip(vals, errs)) * 1.15)
     save(fig, "F2_source_rmse")
 
 
