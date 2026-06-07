@@ -1,20 +1,15 @@
-"""Merge raw CSV files per ship and rename columns to match DANAE's synchronized schema.
-
-Usage:
-    python prepare_ship_data.py kastor
-    python prepare_ship_data.py thalia
-    python prepare_ship_data.py all
-
-Outputs: PhD/<SHIP_NAME>_Synchronized_usable_data.xlsx
-"""
+"""Merge raw per-vessel CSV files and normalise column names to the shared DANAE schema,
+producing a single Excel file per ship that downstream loaders can read without any
+further renaming."""
 
 import sys
 import glob
 import pandas as pd
 from pathlib import Path
 
-# Column mapping: DANAE (target) <- raw CSV name patterns
-# The raw Laros CSVs append units in parentheses; we strip them.
+# Laros onboard logger appends sensor sources and units to every column header
+# (e.g. "M/E Shaft RPM_TRQM (rpm)").  The right-hand values are the canonical
+# DANAE names that the rest of the pipeline expects.
 LAROS_COLUMN_MAP = {
     "TIME": "TIME",
     "Speed Through Water_TRQM (knots)": "Speed-Through-Water",
@@ -45,6 +40,7 @@ LAROS_COLUMN_MAP = {
     "Starboard Rudder_BRG_AUTOP (degrees)": "Starboard_rudder_sensor_BRG_AUTOP",
 }
 
+# Thalia uses a different Laros firmware version with slightly different sensor labels.
 THALIA_COLUMN_MAP = {
     "TIME": "TIME",
     "Speed over water_BRG_SLOG (knots)": "Speed-Through-Water",
@@ -72,7 +68,13 @@ THALIA_COLUMN_MAP = {
 }
 
 def build_metis_column_map(ship_name):
-    """Build column mapping for Metis-platform ships (Apollon, Menelaos, Thisseas)."""
+    """Build column mapping for Metis-platform ships (Apollon, Menelaos, Thisseas).
+
+    Metis exports use fully-qualified sensor descriptions with the vessel name
+    embedded, e.g. 'Vessel Hull Through Water Longitudinal Speed ... - Apollon [VALUE]'.
+    This function generates the correct keys programmatically rather than maintaining
+    a separate hard-coded dict for every ship.
+    """
     s = ship_name.capitalize()
     return {
         f"Time [TIMESTAMP]": "TIME",
@@ -97,6 +99,8 @@ def build_metis_column_map(ship_name):
     }
 
 
+# Each entry maps a ship name to (glob pattern(s), column-map).
+# Thalia is split across two revision directories, hence the list of patterns.
 SHIP_CSV_GLOBS = {
     "kastor": ("PhD/Laros/Kastor/Kastor *.clean.csv", LAROS_COLUMN_MAP),
     "thalia": ([
@@ -130,23 +134,29 @@ def merge_and_rename(ship_name: str) -> Path:
         df = pd.read_csv(f)
         dfs.append(df)
 
+    # Concatenate monthly/periodic export files into a single frame; index is reset
+    # so row numbers are contiguous before the time-sort below.
     merged = pd.concat(dfs, ignore_index=True)
     print(f"Total rows after concat: {len(merged)}")
 
-    # Rename columns that exist using the ship-specific mapping
+    # Only rename columns that are actually present; missing sensors vary by ship and
+    # export vintage, so a strict rename would raise on absent keys.
     rename_map = {}
     for raw_col, target_col in col_map.items():
         if raw_col in merged.columns:
             rename_map[raw_col] = target_col
     merged.rename(columns=rename_map, inplace=True)
 
-    # Drop duplicate columns (e.g. Speed-Through-Water.1)
+    # pandas appends ".1" suffixes when concat produces duplicate column names (e.g.
+    # a column renamed and the original still present); drop those artifacts.
     dup_cols = [c for c in merged.columns if c.endswith('.1')]
     if dup_cols:
         merged.drop(columns=dup_cols, inplace=True)
         print(f"Dropped {len(dup_cols)} duplicate columns: {dup_cols}")
 
-    # Drop columns not in DANAE schema (engine temps, tank levels, etc.)
+    # Restrict to the DANAE schema columns so every ship produces a file with
+    # identical structure.  Engine temperatures, tank levels, and other ship-specific
+    # signals are intentionally excluded here.
     danae_cols = [
         "TIME", "Speed-Through-Water", "Rel-Wind-Speed", "Rel-Wind-Direction",
         "Fore draft_AMS", "Aft draft_AMS",
@@ -169,14 +179,16 @@ def merge_and_rename(ship_name: str) -> Path:
         print(f"Dropping {len(extra)} columns not in DANAE schema.")
     merged = merged[keep_cols]
 
-    # Sort by TIME
+    # Coerce TIME to datetime (errors="coerce" turns unparseable strings into NaT),
+    # sort chronologically, then discard rows where the timestamp is missing entirely.
     if "TIME" in merged.columns:
         merged["TIME"] = pd.to_datetime(merged["TIME"], errors="coerce")
         merged.sort_values("TIME", inplace=True)
         merged.dropna(subset=["TIME"], inplace=True)
         merged.reset_index(drop=True, inplace=True)
 
-    # Drop full-duplicate rows
+    # Remove rows that are exact duplicates across all columns — common at revision
+    # boundaries where export windows overlap.
     before = len(merged)
     merged.drop_duplicates(inplace=True)
     after = len(merged)
