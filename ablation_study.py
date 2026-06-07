@@ -25,7 +25,7 @@ from pinode_common import (
     load_danae_temporal_sequences, make_loaders, predict_power, rmse_mape,
 )
 
-# Winning regularization config from the sweep (see EXPERIMENTAL_PLAN.md Phase 2).
+# Best regularisation weights selected by sweep_pinode_regularization.py.
 LAMBDA_RANGE, LAMBDA_CURV, LAMBDA_PRIOR = 0.25, 0.01, 0.001
 
 # Each config specifies model flags and which meta columns to exclude from the feature matrix.

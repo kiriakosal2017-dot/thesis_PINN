@@ -77,7 +77,7 @@ def main():
     )
 
     print("\n" + "=" * 60)
-    print("PHASE 2.2: Final PI-NODE Training (Winning Config)")
+    print("Final PI-NODE training (selected regularisation config)")
     print("  lambda_range=0.25, lambda_curv=0.01, lambda_prior=0.001")
     print("=" * 60)
 
@@ -102,7 +102,7 @@ def main():
     print("Saved best_model_PI_NODE_danae.pt and data_processor_danae_temporal.pkl")
 
     print("\n" + "=" * 60)
-    print("PHASE 1+2 COMPLETE -- Summary:")
+    print("Training complete -- summary:")
     print(f"  DATA    Test RMSE:  424.80 kW")
     print(f"  HYBRID  Test RMSE:  703.69 kW")
     print(f"  PI-NODE Test RMSE:  {test_rmse:.2f} kW")
