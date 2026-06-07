@@ -54,6 +54,8 @@ class PIKANModel(UnifiedPhysicsHybridModel):
         )
 
     def n_params(self):
+        # Convenience method: reports the KAN's parameter count for comparison
+        # with the MLP-based models (useful sanity check before training).
         return sum(p.numel() for p in self.model.parameters() if p.requires_grad)
 
     def cross_validate(self, *args, **kwargs):
@@ -68,6 +70,9 @@ class PIKANModel(UnifiedPhysicsHybridModel):
 
 
 if __name__ == "__main__":
+    # Quick end-to-end training run using the project's default data pipeline.
+    # Intended for manual verification; evaluation scripts (evaluate_pikan.py,
+    # train_multiseed_pikan.py) drive the full experimental protocol.
     dp = DataProcessor()
     result = dp.load_and_prepare_data()
     if result is None:
