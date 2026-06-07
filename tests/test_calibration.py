@@ -1,4 +1,4 @@
-"""Unit tests for the post-hoc calibration math (no pytest; run standalone)."""
+"""Unit checks for the post-hoc calibration math in calibrate_uncertainty."""
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
@@ -9,7 +9,7 @@ from calibrate_uncertainty import (
 
 
 def test_temperature_recovers_scalar_inflation():
-    # If true spread is c*sigma, the NLL-optimal T should recover ~c.
+    # If true spread is c*sigma, the NLL-optimal temperature should recover approximately c.
     rng = np.random.default_rng(0)
     n = 40000
     mu = rng.normal(0, 100, n)
@@ -21,6 +21,7 @@ def test_temperature_recovers_scalar_inflation():
 
 
 def test_conformal_achieves_nominal_coverage_when_raw_does_not():
+    # Conformal calibration must bring an under-confident model up to the nominal coverage level.
     rng = np.random.default_rng(1)
     n = 40000
     mu = rng.normal(0, 100, n)
@@ -40,21 +41,25 @@ def test_conformal_achieves_nominal_coverage_when_raw_does_not():
 
 
 def test_conformal_quantile_finite_sample_correction():
-    # n=9, alpha=0.10 -> k=ceil(10*0.90)=9 <= 9 -> 9th (largest) score.
+    # With n=9 calibration points the finite-sample correction clips at the largest score
+    # for alpha=0.10 and returns infinity when the required rank exceeds n.
     sigma = np.ones(9)
     resid = np.arange(1, 10, dtype=float)  # |resid|/sigma = 1..9
+    # n=9, alpha=0.10 -> k=ceil(10*0.90)=9 <= 9 -> 9th (largest) score.
     assert conformal_quantile(resid, sigma, alpha=0.10) == 9.0
     # n=9, alpha=0.05 -> k=ceil(10*0.95)=10 > 9 -> not enough data -> inf.
     assert conformal_quantile(resid, sigma, alpha=0.05) == float("inf")
 
 
 def test_safe_sigma_floors_small_values():
+    # Near-zero sigma values cause division instability; they must be clipped to SIGMA_FLOOR.
     s = _safe_sigma(np.array([0.0, 1e-12, 5.0]))
     assert (s >= SIGMA_FLOOR).all()
     assert s[2] == 5.0
 
 
 def test_z_two_sided_values():
+    # Spot-check the z-table constants used for interval construction.
     assert abs(Z_TWO_SIDED[0.90] - 1.6448536) < 1e-4
     assert abs(Z_TWO_SIDED[0.95] - 1.9599640) < 1e-4
 
@@ -65,4 +70,4 @@ if __name__ == "__main__":
     test_conformal_quantile_finite_sample_correction()
     test_safe_sigma_floors_small_values()
     test_z_two_sided_values()
-    print("ALL CALIBRATION UNIT TESTS PASSED")
+    print("all calibration unit tests passed")
