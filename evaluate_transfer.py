@@ -218,7 +218,7 @@ def evaluate_pinode_zeroshot(proc_temp_target, X_train_t, X_test_t, X_train_uns_
 
 def main():
     ship_name = get_ship_name()
-    print(f"Phase 4: Zero-Shot Transfer Learning → {ship_name}")
+    print(f"Zero-shot transfer learning -> {ship_name}")
     print(f"Models trained on DANAE, evaluated on {ship_name} (no retraining)\n")
 
     (proc_tab, X_test_tab, X_test_uns_tab, y_test_tab,
@@ -230,7 +230,7 @@ def main():
     results.append(evaluate_pinode_zeroshot(proc_temp, X_train_t, X_test_t, X_train_uns_t, X_test_uns_t, y_test_t))
 
     print("\n" + "=" * 70)
-    print(f"PHASE 4 SUMMARY: Zero-Shot Transfer → {ship_name}")
+    print(f"Zero-shot transfer summary -> {ship_name}")
     print(f"(All models trained on DANAE, no retraining on {ship_name})")
     print("=" * 70)
     print(f"  {'Model':<12} {'RMSE (kW)':>12} {'MAPE':>10}")

@@ -235,7 +235,7 @@ def main():
         all_results[pct] = (results, threshold)
 
     print("\n" + "=" * 80)
-    print("PHASE 3 FINAL SUMMARY")
+    print("Steady vs transient regime summary")
     print("=" * 80)
     for pct, (results, threshold) in all_results.items():
         print(f"\n  P{pct} threshold: |dV/dt| >= {threshold:.6f} m/s^2")
