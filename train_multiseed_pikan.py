@@ -1,8 +1,8 @@
 """Train the PI-KAN baseline under N seeds for a confidence interval.
 
-Mirrors train_multiseed.py's resume-from-CSV pattern but uses the TABULAR pipeline
-(like HYBRID) and PIKANModel. Produces results/multiseed_pikan_results.csv and prints
-mean +/- std, to compare apples-to-apples with the PI-NODE multi-seed number.
+Mirrors train_multiseed.py's resume-from-CSV pattern but uses the tabular pipeline
+(identical to HYBRID) and PIKANModel, producing results/multiseed_pikan_results.csv
+for a direct apples-to-apples comparison with the PI-NODE multi-seed numbers.
 
 Usage:
     python train_multiseed_pikan.py                  # seeds 0..4, full protocol
@@ -21,11 +21,13 @@ from main_HYBRID import _build_feature_indices
 from main_PI_KAN import PIKANModel
 from read_data import DataProcessor
 
-# Must match evaluate_pikan.py's KAN_WIDTH_TAIL.
+# Architecture tail kept in sync with evaluate_pikan.py so checkpoints are
+# loadable by the evaluation script without modification.
 KAN_WIDTH_TAIL = [64, 32, 1]
 
 
 def predict_kw(model, X, dp):
+    """Run a full forward pass and invert the output scaler to physical kW."""
     model.model.eval()
     with torch.no_grad():
         xb = torch.tensor(X.values, dtype=torch.float32, device=model.device)
@@ -43,6 +45,7 @@ def main():
     results_dir.mkdir(exist_ok=True)
     out_csv = results_dir / "multiseed_pikan_results.csv"
 
+    # Resume-from-CSV: read completed seeds and skip them on restart.
     rows, done = [], set()
     if out_csv.exists():
         with open(out_csv, newline="") as f:
@@ -51,6 +54,8 @@ def main():
         if done:
             print(f"Resuming — seeds already done: {sorted(done)}; will skip these.")
 
+    # Tabular preprocessing is deterministic and shared across all seeds;
+    # load and scale once to avoid redundant I/O.
     dp = DataProcessor()
     result = dp.load_and_prepare_data()
     if result is None:
@@ -59,10 +64,13 @@ def main():
     feature_indices = _build_feature_indices(X_train_uns)
     in_size = X_train.shape[1]
 
+    # Chronological 80/20 split: the last 20% of training rows form the validation
+    # set so that later time steps are never used to tune earlier ones.
     n_val = int(len(X_train) * 0.2)
     X_tr, X_val = X_train.iloc[:-n_val], X_train.iloc[-n_val:]
     X_tr_un = X_train_uns.iloc[:-n_val]
     y_tr, y_val = y_train.iloc[:-n_val], y_train.iloc[-n_val:]
+    # Invert test labels once here; avoids repeated scaler calls inside the loop.
     true = dp.inverse_transform_y(y_test.values).ravel()
 
     for seed in args.seeds:
@@ -84,6 +92,7 @@ def main():
         )
         train_loader = model.prepare_combined_dataloader(X_tr, X_tr_un, y_tr, shuffle=True)
         val_loader = model.prepare_dataloader(X_val, y_val)
+        # Seed-specific checkpoint path preserves all N models for ensemble use.
         ckpt = str(results_dir / f"best_model_PI_KAN_seed{seed}.pt")
         model.train(train_loader, X_tr_un, feature_indices, dp,
                     val_loader=val_loader, checkpoint_path=ckpt)
@@ -95,6 +104,7 @@ def main():
         rows.append({"seed": seed, "test_rmse_kw": round(rmse, 2),
                      "test_mape_pct": round(mape, 3)})
 
+        # Write incrementally so only the in-flight seed is lost on a crash.
         with open(out_csv, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
             w.writeheader()
@@ -103,6 +113,7 @@ def main():
     rmses = np.array([float(r["test_rmse_kw"]) for r in rows])
     mapes = np.array([float(r["test_mape_pct"]) for r in rows])
     print("\n" + "=" * 70 + f"\nPI-KAN MULTI-SEED SUMMARY ({len(rows)} seeds)\n" + "=" * 70)
+    # ddof=1: unbiased sample std over the small seed ensemble.
     print(f"  RMSE: {rmses.mean():.2f} +/- {rmses.std(ddof=1):.2f} kW")
     print(f"  MAPE: {mapes.mean():.3f} +/- {mapes.std(ddof=1):.3f} %")
     print(f"\nSaved -> {out_csv}")

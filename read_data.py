@@ -1,3 +1,10 @@
+"""Data loading, quality filtering, and sequence construction for ship-power models.
+
+Handles both static (tabular) and temporal (time-ordered) data paths.  The
+temporal path additionally computes dt and longitudinal acceleration for the
+PI-NODE's transient-regime analysis and sequence gap detection.
+"""
+
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
@@ -6,8 +13,8 @@ from pathlib import Path
 from config import DataConfig, ColumnConfig, SequenceConfig
 
 
-# Columns that are derived for sequencing / transient analysis (gap detection,
-# dV/dt) but must NOT be fed to the models as predictive features.
+# Columns synthesised during the temporal pipeline (gap detection, dV/dt) that
+# must NOT be passed as model inputs — they exist only as bookkeeping signals.
 META_COLUMNS = ('dt', 'acceleration')
 # Substrings that identify weather features (routed to the PI-NODE weather branch).
 WEATHER_KEYWORDS = ('wind', 'wave', 'swell')
@@ -47,18 +54,25 @@ class DataProcessor:
         fill_missing_with_median=True,
         exclude_missing_Hs=True,
     ):
+        # Fall back to centralised config when caller passes no arguments.
         self.file_path = file_path or DataConfig.FILE_PATH
         self.target_column = target_column or DataConfig.TARGET_COLUMN
         self.drop_columns = drop_columns if drop_columns is not None else DataConfig.DROP_COLUMNS
         self.test_size = test_size if test_size is not None else DataConfig.TEST_SIZE
         self.random_state = random_state if random_state is not None else DataConfig.RANDOM_STATE
         self.fill_missing_with_median = fill_missing_with_median
+        # Significant wave height (Hs) rows with NaN are excluded by default because
+        # Hs is a mandatory input to the wave-resistance term; imputing it would
+        # silently break the physics layer.
         self.exclude_missing_Hs = exclude_missing_Hs
+        # Scalers are fitted on the training split and kept on the instance so that
+        # downstream code can call inverse_transform_y without reloading data.
         self.scaler_X = StandardScaler()
         self.scaler_y = StandardScaler()
         self.df = None
 
     def _read_input_file(self):
+        # Detect Excel vs CSV by extension to avoid hard-coding the format.
         file_path = Path(self.file_path)
         suffix = file_path.suffix.lower()
         if suffix in [".xlsx", ".xls"]:
@@ -66,6 +80,8 @@ class DataProcessor:
         return pd.read_csv(self.file_path)
 
     def _drop_all_nan_numeric_columns(self):
+        # Columns that are entirely NaN carry no information and would cause
+        # StandardScaler to emit NaN means/scales, breaking the transform step.
         numeric_cols = self.df.select_dtypes(include=['float64', 'int64']).columns
         all_nan_numeric = [col for col in numeric_cols if self.df[col].isna().all()]
         if all_nan_numeric:
@@ -100,6 +116,7 @@ class DataProcessor:
             print(f"An error occurred while reading the file: {e}")
             return None
 
+        # Remove user-specified columns (e.g. raw timestamp strings).
         if self.drop_columns is not None:
             for col in self.drop_columns:
                 if col in self.df.columns:
@@ -111,6 +128,8 @@ class DataProcessor:
             print(f"Error: Target column '{self.target_column}' not found in the dataset.")
             return None
 
+        # Drop rows where significant wave height is NaN before filtering on power/speed,
+        # so that the subsequent quality cuts operate on a consistent row set.
         if self.exclude_missing_Hs:
             wave_col = ColumnConfig.WAVE_HEIGHT
             if wave_col in self.df.columns:
@@ -121,6 +140,8 @@ class DataProcessor:
             else:
                 print(f"Warning: '{wave_col}' column not found in the dataset.")
 
+        # Remove harbour/manoeuvring records; these regimes are physically distinct
+        # from ocean passage and would corrupt the calm-water resistance model.
         self.df = self.df[self.df[self.target_column] >= DataConfig.MIN_POWER]
 
         speed_col = ColumnConfig.SPEED
@@ -141,6 +162,7 @@ class DataProcessor:
         )
         X_train_unscaled, X_test_unscaled = self._impute_train_test(X_train_unscaled, X_test_unscaled)
 
+        # Fit scalers on training data only; apply the same transform to test.
         self.scaler_X.fit(X_train_unscaled)
         X_train_scaled = self.scaler_X.transform(X_train_unscaled)
         X_test_scaled = self.scaler_X.transform(X_test_unscaled)
@@ -149,6 +171,8 @@ class DataProcessor:
         y_train_scaled = self.scaler_y.transform(y_train_unscaled)
         y_test_scaled = self.scaler_y.transform(y_test_unscaled)
 
+        # Restore column names after numpy transform so downstream code can look up
+        # features by name (e.g. split_calm_weather_indices).
         X_train = pd.DataFrame(X_train_scaled, columns=X.columns)
         X_test = pd.DataFrame(X_test_scaled, columns=X.columns)
 
@@ -215,10 +239,11 @@ class DataProcessor:
             print(f"Error: Time column '{time_col}' not found. Cannot build temporal data.")
             return None
 
+        # Parse timestamps and sort chronologically so diff() gives positive dt values.
         self.df[time_col] = pd.to_datetime(self.df[time_col])
         self.df = self.df.sort_values(by=time_col).reset_index(drop=True)
 
-        # Drop non-TIME columns that were requested
+        # Drop non-TIME columns that were requested; TIME is kept until after dt computation.
         if self.drop_columns is not None:
             for col in self.drop_columns:
                 if col == time_col:
@@ -230,6 +255,7 @@ class DataProcessor:
             print(f"Error: Target column '{self.target_column}' not found.")
             return None
 
+        # Same Hs / power / speed quality filters as the static pipeline.
         if self.exclude_missing_Hs:
             wave_col = ColumnConfig.WAVE_HEIGHT
             if wave_col in self.df.columns:
@@ -254,17 +280,19 @@ class DataProcessor:
         knots_to_ms = 0.51444
         time_series = self.df[time_col]
         dt_seconds = time_series.diff().dt.total_seconds().values
+        # First row has no predecessor; copy the second row's dt to avoid a NaN sentinel.
         dt_seconds[0] = dt_seconds[1] if len(dt_seconds) > 1 else 1.0
 
         V_ms = self.df[speed_col].values * knots_to_ms
         dV = np.diff(V_ms, prepend=V_ms[0])
+        # Guard against zero-length time steps (duplicate timestamps) to prevent inf.
         dt_safe = np.where(dt_seconds > 0, dt_seconds, 1.0)
         acceleration = dV / dt_safe
 
         self.df['dt'] = dt_seconds
         self.df['acceleration'] = acceleration
 
-        # Now drop the TIME column (we've extracted what we need)
+        # TIME has served its purpose; drop it before feature matrix construction.
         self.df.drop(columns=[time_col], inplace=True)
 
         X = self.df.drop(self.target_column, axis=1)
@@ -327,6 +355,8 @@ def create_sequences(X_scaled, X_unscaled, y_scaled, seq_length=None, max_gap=No
     X_uns_vals = X_unscaled.values
     y_vals = y_scaled.values
 
+    # Use the unscaled dt column so gap comparisons are in real seconds, not
+    # StandardScaler-normalised units.
     dt_col_idx = list(X_unscaled.columns).index('dt')
 
     X_seq, X_uns_seq, y_seq = [], [], []
@@ -334,11 +364,14 @@ def create_sequences(X_scaled, X_unscaled, y_scaled, seq_length=None, max_gap=No
     for i in range(len(X_vals) - seq_length + 1):
         window_dt = X_uns_vals[i:i + seq_length, dt_col_idx]
 
+        # Discard windows that straddle a logging gap (port call, sensor outage, etc.)
+        # to prevent the LSTM from learning across discontinuous time stretches.
         if np.any(window_dt > max_gap):
             continue
 
         X_seq.append(X_vals[i:i + seq_length])
         X_uns_seq.append(X_uns_vals[i:i + seq_length])
+        # Label is the power at the final step of the window (causal prediction target).
         y_seq.append(y_vals[i + seq_length - 1])
 
     return np.array(X_seq), np.array(X_uns_seq), np.array(y_seq)

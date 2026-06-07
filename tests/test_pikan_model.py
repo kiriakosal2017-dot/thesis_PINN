@@ -1,4 +1,4 @@
-"""Smoke test: PIKANModel reuses HYBRID physics with a KAN backbone (run standalone or via pytest)."""
+"""Tests for PIKANModel: verifies that it wires a KAN backbone and that the physics-informed loss backpropagates correctly."""
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
@@ -7,6 +7,7 @@ from main_PI_KAN import PIKANModel
 
 
 def test_backbone_is_kan():
+    # PIKANModel must use a KAN (not an MLP) as its backbone; wrong type breaks the spline-physics coupling.
     m = PIKANModel(input_size=7, kan_width=[7, 16, 1], epochs=1, batch_size=8)
     assert isinstance(m.model, KAN), f"backbone is {type(m.model)}, expected KAN"
 
@@ -33,7 +34,7 @@ def test_forward_and_physics_losses_backprop():
 
 
 class _FakeProc:
-    """Stand-in scaler_X that is identity, just for collocation sampling shape."""
+    """Stand-in scaler_X that is identity, used only for collocation sampling shape."""
     class _S:
         def transform(self, df):
             return df.values
@@ -43,4 +44,4 @@ class _FakeProc:
 if __name__ == "__main__":
     test_backbone_is_kan()
     test_forward_and_physics_losses_backprop()
-    print("ALL PIKAN MODEL SMOKE TESTS PASSED")
+    print("all PIKANModel tests passed")

@@ -1,3 +1,7 @@
+"""Grid-search the three PI-NODE physics-regularisation weights (KQ range penalty,
+curvature penalty, and Bayesian prior penalty) and record the test-set RMSE for each
+combination, so the best lambda triplet can be selected before the final model run."""
+
 import csv
 from pathlib import Path
 
@@ -7,7 +11,8 @@ from main_PI_NODE_Propeller import PINODEPropellerModel
 
 
 def main():
-    # Ensure RPM feature is available for propeller physics.
+    # RPM is consumed by the propeller physics head; remove it from the drop-list
+    # if a previous config accidentally excluded it.
     if "Propeller-Shaft-RPM" in DataConfig.DROP_COLUMNS:
         DataConfig.DROP_COLUMNS.remove("Propeller-Shaft-RPM")
 
@@ -20,8 +25,8 @@ def main():
     X_train, X_test, X_train_uns, X_test_uns, y_train, y_test, _, _ = res
     feature_indices = {c: i for i, c in enumerate(X_train.columns)}
 
-    # Identify calm-water and weather indices based on column names
-    # (dt/acceleration meta columns are excluded from both branches).
+    # Calm-water features feed the polynomial KQ/KT terms; weather features feed the
+    # additive correction branch.  dt/acceleration meta-columns are excluded from both.
     calm_water_indices, weather_indices = split_calm_weather_indices(X_train.columns)
 
     seq_len = SequenceConfig.LENGTH
@@ -32,9 +37,13 @@ def main():
         X_test, X_test_uns, y_test, seq_length=seq_len
     )
 
+    # Hold out 20 % of training sequences as a validation set for early stopping;
+    # the final ranking uses test RMSE to avoid selection bias.
     n_val = int(len(X_tr_seq) * 0.2)
 
-    # Small, focused sweep around your current strong setup.
+    # One-at-a-time sweep: each row varies a single lambda while holding the others
+    # at the strong baseline, making individual sensitivity easy to read off.
+    # "gentle_all" simultaneously relaxes all three to check for cooperative effects.
     sweep = [
         {"name": "baseline", "range": 0.50, "curv": 0.0100, "prior": 0.0010},
         {"name": "range_low", "range": 0.25, "curv": 0.0100, "prior": 0.0010},
@@ -50,7 +59,8 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     out_csv = out_dir / "pinode_regularization_sweep.csv"
 
-    # Resume: load any previously completed results
+    # Resume support: if the CSV already exists, load completed rows so a
+    # mid-run interruption doesn't force repeating expensive training runs.
     results = []
     completed_names = set()
     if out_csv.exists():
@@ -77,6 +87,8 @@ def main():
         )
         print("=" * 80)
 
+        # Architecture and training hyper-parameters are held constant across all
+        # sweep configs; only the regularisation weights change.
         model = PINODEPropellerModel(
             input_size=X_tr_seq.shape[2],
             feature_indices=feature_indices,
@@ -92,7 +104,8 @@ def main():
             encoder_mode="first",
         )
 
-        # Per-run regularization override.
+        # Override regularisation weights for this sweep point after construction
+        # because the constructor does not expose them directly.
         model.LAMBDA_KQ_RANGE = cfg["range"]
         model.LAMBDA_KQ_CURVATURE = cfg["curv"]
         model.LAMBDA_KQ_PRIOR = cfg["prior"]
@@ -107,6 +120,8 @@ def main():
             X_te_seq, X_te_uns_seq, y_te_seq, shuffle=False
         )
 
+        # Each config saves its own checkpoint so the best weights can be
+        # retrieved independently without re-training.
         ckpt = out_dir / f"best_pinode_reg_{cfg['name']}.pt"
         model.train(
             train_loader,
@@ -127,11 +142,13 @@ def main():
             }
         )
 
+        # Write after every config so partial results survive a crash.
         with out_csv.open("w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=list(results[0].keys()))
             writer.writeheader()
             writer.writerows(results)
 
+    # Selection criterion: lowest test RMSE wins.
     best = min(results, key=lambda r: r["test_rmse_kw"])
     print("\n" + "#" * 80)
     print(f"Best config: {best}")
@@ -141,4 +158,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

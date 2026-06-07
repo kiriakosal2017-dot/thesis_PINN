@@ -1,17 +1,10 @@
 """
-make_figures.py — Publication figures for the PI-NODE paper.
+make_figures.py — generates all publication figures (F1–F10) for the PI-NODE paper.
 
-Single entry point that regenerates every paper figure into results/figures/
-as BOTH vector PDF (for LaTeX) and PNG preview (300 dpi).
-
-Data sources (post-2026-06 methodology fixes):
-  * Loss curves (F1): results/history/<model>_danae.csv if present, else parsed
-    from the re-run logs (baseline_rerun.log, pinode_rerun.log).
-  * F2-F5 numeric tables: recorded in docs/EXPERIMENT_RUNBOOK.md and the re-run
-    logs. Kept here as constants with provenance comments so the figures are
-    reproducible without re-running the experiments.
-
-Run:  /Users/kiriakos/miniforge3/envs/DL_Democritos_ptyx/bin/python make_figures.py
+Each fig_* function writes one figure to results/figures/ as both a vector PDF
+(for LaTeX inclusion) and a 300-dpi PNG preview.  Loss-curve data is loaded from
+saved CSV histories when available, falling back to regex-parsed training logs;
+all other numeric results are stored as constants below with provenance comments.
 """
 import os
 import re
@@ -26,9 +19,13 @@ import matplotlib.pyplot as plt
 FIG_DIR = "results/figures"
 HIST_DIR = "results/history"
 
+# Consistent palette across all figures: green = physics-informed, purple = KAN,
+# blue = data-only, red = hybrid.  ORDER drives the axis ordering in most plots.
 COLORS = {"PI-NODE": "#1b7837", "PI-KAN": "#762a83", "DATA": "#2166ac", "HYBRID": "#b2182b"}
 ORDER = ["PI-NODE", "DATA", "HYBRID"]
 
+# Minimal rcParams: grid at 30% opacity keeps clutter low; spines removed on top/right
+# for a cleaner half-frame look consistent with the paper's style guide.
 plt.rcParams.update({
     "figure.dpi": 110,
     "savefig.dpi": 300,
@@ -42,6 +39,8 @@ plt.rcParams.update({
 
 
 def save(fig, name):
+    # tight_layout before save prevents label clipping; close immediately to keep
+    # memory flat when regenerating all ten figures in one pass.
     os.makedirs(FIG_DIR, exist_ok=True)
     pdf = os.path.join(FIG_DIR, name + ".pdf")
     png = os.path.join(FIG_DIR, name + ".png")
@@ -56,6 +55,8 @@ def save(fig, name):
 # Loss-history loading: prefer saved CSV, fall back to log parsing
 # --------------------------------------------------------------------------- #
 def _load_history_csv(path):
+    # Structured CSV is the authoritative source when available; val_loss may
+    # be absent in early-epoch rows, so .get() is used defensively.
     epochs, train, val = [], [], []
     with open(path) as f:
         for row in csv.DictReader(f):
@@ -92,6 +93,8 @@ def _parse_log(path, pattern, section_start=None, section_end=None):
     return train, val
 
 
+# Each model trainer prints epochs in a distinct format; separate patterns avoid
+# false matches when DATA and HYBRID share a single log file.
 # DATA:    "Epoch [163/1000], Training Loss: 0.0041, Validation Loss: 0.0545"
 PAT_DATA = re.compile(
     r"Epoch \[\d+/\d+\], Training Loss:\s*(?P<tr>[\d.]+),\s*Validation Loss:\s*(?P<vl>[\d.]+)")
@@ -105,6 +108,9 @@ PAT_PINODE = re.compile(
 
 def get_loss_history(model):
     """Return (train, val) lists. CSV history wins; else parse the log."""
+    # CSV histories in results/history/ are written by training scripts and carry
+    # the full epoch-by-epoch record.  Log files are the fallback for runs where
+    # history saving was not configured.
     csv_path = os.path.join(HIST_DIR, f"{model.replace('-', '_')}_danae.csv")
     if os.path.exists(csv_path):
         _, tr, vl = _load_history_csv(csv_path)
@@ -123,11 +129,11 @@ def get_loss_history(model):
 
 
 # --------------------------------------------------------------------------- #
-# Numeric tables (provenance: docs/EXPERIMENT_RUNBOOK.md + re-run logs)
+# Numeric tables (provenance: docs/EXPERIMENT_RUNBOOK.md + training logs)
 # --------------------------------------------------------------------------- #
 # F2 source-domain test RMSE (kW) on DANAE.
-# PI-NODE/DATA/HYBRID are canonical single runs; PI-KAN is the 5-seed mean (±std drawn
-# as an error bar) from results/multiseed_pikan_results.csv (step 13).
+# PI-NODE/DATA/HYBRID are single canonical runs; PI-KAN is the 5-seed mean with
+# ±std error bar sourced from results/multiseed_pikan_results.csv.
 SOURCE_RMSE = {"PI-NODE": 312.52, "PI-KAN": 471.04, "DATA": 557.52, "HYBRID": 583.88}
 SOURCE_ORDER = ["PI-NODE", "PI-KAN", "DATA", "HYBRID"]
 SOURCE_RMSE_ERR = {"PI-KAN": 72.80}  # 5-seed std; others are single runs (no CI)
@@ -181,7 +187,7 @@ UQ = [  # (method, rmse_kw, mean_std_kw, coverage95_pct)
     ("Deep Ensemble\n(M=5)", 278.36, 62.13, 51.4),
 ]
 
-# F10 calibration (DANAE test eval-half) — source: results/calibration_results.csv (step 14)
+# F10 calibration (DANAE test eval-half) — source: results/calibration_results.csv
 # Deep-Ensemble empirical coverage per method at each target level.
 CALIBRATION = {
     0.90: {"raw": 0.4524, "temperature": 0.9566, "conformal": 0.9078},
@@ -193,7 +199,9 @@ CALIBRATION = {
 # Figures
 # --------------------------------------------------------------------------- #
 def fig_loss_curves():
-    """F1: training & validation loss per model."""
+    """F1: training & validation loss per model (DANAE source domain)."""
+    # sharey=False because loss scales differ substantially across model families;
+    # log-scale y-axis makes convergence visible even when final loss is very small.
     fig, axes = plt.subplots(1, 3, figsize=(13, 4), sharey=False)
     for ax, model in zip(axes, ORDER):
         tr, vl = get_loss_history(model)
@@ -202,6 +210,8 @@ def fig_loss_curves():
             continue
         ep = range(1, len(tr) + 1)
         ax.plot(ep, tr, color=COLORS[model], lw=1.6, label="Train")
+        # Val loss may be logged less frequently than every epoch; skip None entries
+        # rather than plotting zero or breaking the x-axis.
         vl_ep = [(i + 1, v) for i, v in enumerate(vl) if v is not None]
         if vl_ep:
             xs, ys = zip(*vl_ep)
@@ -217,7 +227,9 @@ def fig_loss_curves():
 
 
 def fig_source_rmse():
-    """F2: source-domain test RMSE bars (incl. the step-13 PI-KAN competitor)."""
+    """F2: source-domain test RMSE bars comparing all four model families."""
+    # PI-KAN carries a 5-seed std error bar; the other three have single-run values
+    # so their error is 0 (no cap drawn).  ylim headroom leaves room for the labels.
     fig, ax = plt.subplots(figsize=(6.5, 4))
     vals = [SOURCE_RMSE[m] for m in SOURCE_ORDER]
     errs = [SOURCE_RMSE_ERR.get(m, 0.0) for m in SOURCE_ORDER]
@@ -235,7 +247,11 @@ def fig_source_rmse():
 
 
 def fig_transient():
-    """F3: steady vs transient MAPE (grouped bars)."""
+    """F3: steady vs transient MAPE (grouped bars, P75 |dV/dt| threshold)."""
+    # Steady bars are rendered at alpha=0.55 to visually distinguish them from the
+    # opaque transient bars while keeping the same hue for each model.
+    # MAPE (index 2/3 of the tuple) is used rather than RMSE because fractional
+    # error is more interpretable across different power regimes.
     fig, ax = plt.subplots(figsize=(7, 4))
     x = range(len(ORDER))
     w = 0.38
@@ -257,7 +273,10 @@ def fig_transient():
 
 
 def fig_transfer():
-    """F4: zero-shot transfer MAPE per vessel (grouped bars)."""
+    """F4: zero-shot transfer MAPE per target vessel (no fine-tuning)."""
+    # KASTOR and MENELAOS are sister vessels to DANAE so PI-NODE transfers well;
+    # THALIA and THISSEAS differ more in hull form, which explains the larger gap.
+    # Width w=0.26 with j-1 centering keeps three bars tightly grouped under each ship label.
     ships = list(TRANSFER.keys())
     fig, ax = plt.subplots(figsize=(9, 4.5))
     x = range(len(ships))
@@ -274,7 +293,9 @@ def fig_transfer():
 
 
 def fig_fewshot():
-    """F5: few-shot MAPE vs data fraction, DATA vs PI-NODE, per ship."""
+    """F5: few-shot MAPE vs fine-tuning data fraction — DATA vs PI-NODE per ship."""
+    # sharey=True enables direct cross-ship comparison; None values are skipped so
+    # an incomplete run does not break the line — a text annotation flags the gap.
     ships = list(FEWSHOT.keys())
     fig, axes = plt.subplots(1, len(ships), figsize=(6.5 * len(ships) / 2, 4),
                              sharey=True)
@@ -299,13 +320,17 @@ def fig_fewshot():
 
 
 def fig_ablation():
-    """F7: ablation — test RMSE per variant, 'full' highlighted."""
+    """F7: ablation study — test RMSE per model variant, full model as reference."""
+    # The "frozen propeller" bar is highlighted in red because its ~3× RMSE increase
+    # (vs full) is the single most important finding: the learnable propeller map
+    # is the architecture's decisive component.
     labels = [a[0] for a in ABLATION]
     rmse = [a[1] for a in ABLATION]
     colors = ["#1b7837" if lbl == "full" else "#7f7f7f" for lbl in labels]
     colors[3] = "#b2182b"  # frozen propeller — the critical degradation
     fig, ax = plt.subplots(figsize=(8, 4.5))
     bars = ax.bar(labels, rmse, color=colors, width=0.65)
+    # Dashed reference line at the full-model RMSE aids direct visual comparison.
     ax.axhline(rmse[0], color="#1b7837", ls="--", lw=1, alpha=0.6,
                label="full (reference)")
     for b, v in zip(bars, rmse):
@@ -321,15 +346,17 @@ def fig_ablation():
 
 def fig_multiseed():
     """F8: per-seed RMSE with mean±SD band, vs DATA/HYBRID baselines."""
+    # The shaded band conveys variance at a glance; individual seed dots confirm no
+    # outlier seeds.  ylim anchored to the HYBRID baseline keeps the scale readable
+    # without wasting space above the worst baseline.
     fig, ax = plt.subplots(figsize=(7, 4.5))
     seeds = list(range(len(MULTISEED_RMSE)))
-    # mean ± SD band
     ax.axhspan(MULTISEED_MEAN - MULTISEED_SD, MULTISEED_MEAN + MULTISEED_SD,
                color=COLORS["PI-NODE"], alpha=0.15, label="PI-NODE mean ± SD")
     ax.axhline(MULTISEED_MEAN, color=COLORS["PI-NODE"], lw=1.4)
     ax.plot(seeds, MULTISEED_RMSE, "o", color=COLORS["PI-NODE"], ms=9,
             label="PI-NODE per seed")
-    # baselines for context
+    # Baseline horizontals reuse SOURCE_RMSE so this figure stays consistent with F2.
     ax.axhline(SOURCE_RMSE["DATA"], color=COLORS["DATA"], ls="--", lw=1.3,
                label=f"DATA ({SOURCE_RMSE['DATA']:.0f})")
     ax.axhline(SOURCE_RMSE["HYBRID"], color=COLORS["HYBRID"], ls=":", lw=1.3,
@@ -347,7 +374,11 @@ def fig_multiseed():
 
 
 def fig_uncertainty():
-    """F9: calibration — empirical 95% coverage vs nominal, per UQ method."""
+    """F9: empirical 95% prediction-interval coverage per UQ method (DANAE)."""
+    # Both MC-Dropout and Deep Ensemble under-cover relative to the nominal 95%
+    # line; the gap motivates the post-hoc recalibration shown in F10.
+    # RMSE is annotated alongside coverage so the accuracy/uncertainty trade-off
+    # is visible in a single bar.
     methods = [u[0] for u in UQ]
     cov = [u[3] for u in UQ]
     fig, ax = plt.subplots(figsize=(6.5, 4.5))
@@ -365,7 +396,11 @@ def fig_uncertainty():
 
 
 def fig_calibration():
-    """F10: empirical coverage before/after recalibration (Deep Ensemble)."""
+    """F10: empirical coverage before/after post-hoc recalibration (Deep Ensemble)."""
+    # Three methods compared at both the 90% and 95% target levels.  The dashed
+    # horizontal lines are the ideal targets; conformal prediction hits them by
+    # construction on the calibration split, which is why it lands closest.
+    # Source data: results/calibration_results.csv (Deep Ensemble, DANAE test eval-half).
     methods = ["raw", "temperature", "conformal"]
     colors = {"raw": "#b2182b", "temperature": "#f1a340", "conformal": "#1b7837"}
     levels = [0.90, 0.95]

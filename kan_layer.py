@@ -1,4 +1,4 @@
-"""Self-contained B-spline Kolmogorov-Arnold Network (efficient-kan formulation).
+"""Self-contained B-spline Kolmogorov–Arnold Network (efficient-kan formulation).
 
 Pure PyTorch, no external dependency (pykan/efficient_kan are not installed). Used as
 the backbone of the PI-KAN baseline (main_PI_KAN.py) so it must support higher-order
@@ -18,6 +18,13 @@ import torch.nn.functional as F
 
 
 class KANLinear(nn.Module):
+    """Single KAN layer: maps (batch, in_features) -> (batch, out_features).
+
+    Each output unit is a sum over all input dimensions, where each univariate
+    contribution is base_activation(x) + learnable_spline(x) — the "base + spline"
+    decomposition from Liu et al. 2024 (efficient-kan variant).
+    """
+
     def __init__(self, in_features, out_features, grid_size=5, spline_order=3,
                  scale_noise=0.1, scale_base=1.0, scale_spline=1.0,
                  base_activation=nn.SiLU, grid_range=(-4.0, 4.0)):
@@ -29,6 +36,10 @@ class KANLinear(nn.Module):
         self.scale_base = scale_base
         self.scale_spline = scale_spline
 
+        # Build the uniform knot vector. A B-spline of order k defined on grid_size
+        # intervals needs grid_size + 2*k + 1 knots total: k "ghost" knots are
+        # extended on each side so that the basis is non-zero at the boundary.
+        # Each input feature gets its own row, so grid is (in_features, n_knots).
         h = (grid_range[1] - grid_range[0]) / grid_size
         if h <= 0:
             raise ValueError(
@@ -39,8 +50,11 @@ class KANLinear(nn.Module):
             .expand(in_features, -1)
             .contiguous()
         )
+        # Register as a buffer so it moves with .to(device) but is not a parameter.
         self.register_buffer("grid", grid)
 
+        # base_weight: standard linear projection applied to base_activation(x).
+        # spline_weight: B-spline coefficients, shape (out, in, grid_size + spline_order).
         self.base_weight = nn.Parameter(torch.empty(out_features, in_features))
         self.spline_weight = nn.Parameter(
             torch.empty(out_features, in_features, grid_size + spline_order)
@@ -49,8 +63,12 @@ class KANLinear(nn.Module):
         self.reset_parameters(scale_noise)
 
     def reset_parameters(self, scale_noise):
+        # Kaiming init for the base path keeps the variance-preserving property
+        # across the linear projection despite the nonlinear base_activation.
         nn.init.kaiming_uniform_(self.base_weight, a=math.sqrt(5) * self.scale_base)
         with torch.no_grad():
+            # Initialise spline weights by fitting a small random function on the
+            # interior knots so the spline path is non-trivial from the first step.
             # interior knots, shape (grid_size + 1, in_features)
             interior_grid = self.grid.T[self.spline_order : -self.spline_order]
             noise = (
@@ -62,10 +80,24 @@ class KANLinear(nn.Module):
             self.spline_weight.data.copy_(self.scale_spline * coeff)
 
     def b_splines(self, x):
-        """x: (batch, in_features) -> (batch, in_features, grid_size + spline_order)."""
+        """Evaluate the B-spline basis at x via the de Boor recurrence.
+
+        x: (batch, in_features) -> returns (batch, in_features, grid_size + spline_order).
+
+        The recurrence builds from order-0 indicator bases (piecewise constant) up to
+        order spline_order using the standard Cox–de Boor formula:
+            B_{i,k}(x) = (x - t_i)/(t_{i+k} - t_i) * B_{i,k-1}(x)
+                        + (t_{i+k+1} - x)/(t_{i+k+1} - t_{i+1}) * B_{i+1,k-1}(x)
+        Each iteration reduces the number of basis functions by 1 (from N+1 to N),
+        ending at grid_size + spline_order functions — exactly spline_weight's last dim.
+        The result must retain the computation graph (no detach) so that second-order
+        autograd through the physics residuals can differentiate through the basis.
+        """
         grid = self.grid
         x = x.unsqueeze(-1)
+        # Order-0: indicator function — 1 if x falls in interval [t_i, t_{i+1}).
         bases = ((x >= grid[:, :-1]) & (x < grid[:, 1:])).to(x.dtype)
+        # Iteratively elevate the spline order using the de Boor recurrence.
         for k in range(1, self.spline_order + 1):
             bases = (
                 (x - grid[:, : -(k + 1)])
@@ -76,6 +108,7 @@ class KANLinear(nn.Module):
                 / (grid[:, k + 1 :] - grid[:, 1:-k])
                 * bases[:, :, 1:]
             )
+        # contiguous() ensures the tensor layout is compact for subsequent matmuls.
         return bases.contiguous()
 
     def _curve2coeff(self, x, y):
@@ -86,16 +119,26 @@ class KANLinear(nn.Module):
         return solution.permute(2, 0, 1).contiguous()   # (out, in, grid+order)
 
     def forward(self, x):
+        # Base path: SiLU-activated linear projection provides a smooth, globally
+        # defined residual that stabilises training when x falls near knot boundaries.
         base_output = F.linear(self.base_activation(x), self.base_weight)
+        # Spline path: flatten the (in_features, n_basis) basis matrix to a vector
+        # per sample so that a single F.linear call computes all (out, in) dot products.
         spline_output = F.linear(
             self.b_splines(x).view(x.size(0), -1),
             self.spline_weight.view(self.out_features, -1),
         )
+        # The additive combination lets the base handle regions outside the spline
+        # support while the spline refines the fit inside.
         return base_output + spline_output
 
 
 class KAN(nn.Module):
-    """Stack of KANLinear layers. layers_hidden = [in, h1, ..., out]."""
+    """Stack of KANLinear layers forming a full Kolmogorov–Arnold Network.
+
+    layers_hidden lists the width at each stage: [in, h1, h2, ..., out].
+    All layers share the same grid_size and spline_order.
+    """
 
     def __init__(self, layers_hidden, grid_size=5, spline_order=3):
         super().__init__()
@@ -109,6 +152,7 @@ class KAN(nn.Module):
         )
 
     def forward(self, x):
+        # Sequential pass through KANLinear layers; no skip connections.
         for layer in self.layers:
             x = layer(x)
         return x

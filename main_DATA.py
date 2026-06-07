@@ -1,3 +1,9 @@
+"""
+Pure data-driven baseline (DATA): a standard MLP trained solely on observed shaft-power
+measurements. No physics terms are included, making this the weakest prior but also the
+most flexible benchmark against which physics-informed variants are compared.
+"""
+
 import copy
 import torch
 import numpy as np
@@ -24,6 +30,8 @@ class DataDrivenModel(BaseModel):
         best_state = None
         best_val_loss = float("inf")
         epochs_without_improvement = 0
+        # Early stopping guards against overfitting on ship operational data,
+        # which is often noisy and auto-correlated.
         patience = TrainingConfig.EARLY_STOPPING_PATIENCE
         min_delta = TrainingConfig.EARLY_STOPPING_MIN_DELTA
 
@@ -41,6 +49,7 @@ class DataDrivenModel(BaseModel):
                 leave=False,
             )
 
+            # Standard supervised forward-backward pass; no physics terms.
             for X_batch, y_batch in progress_bar:
                 X_batch, y_batch = X_batch.to(self.device), y_batch.to(self.device)
 
@@ -56,6 +65,7 @@ class DataDrivenModel(BaseModel):
             train_losses.append(avg_train_loss)
 
             if val_loader is not None:
+                # Evaluate on validation set without gradient tracking.
                 self.model.eval()
                 val_running_loss = 0.0
                 with torch.no_grad():
@@ -69,6 +79,8 @@ class DataDrivenModel(BaseModel):
                 print(f"Epoch [{epoch+1}/{self.epochs}], Training Loss: {avg_train_loss:.8f}, "
                       f"Validation Loss: {avg_val_loss:.8f}")
 
+                # Keep the snapshot with the lowest validation loss seen so far;
+                # improvement must exceed min_delta to avoid saving on noise.
                 if (best_val_loss - avg_val_loss) > min_delta:
                     best_val_loss = avg_val_loss
                     best_state = copy.deepcopy(self.model.state_dict())
@@ -115,11 +127,14 @@ class DataDrivenModel(BaseModel):
                     w.writerow([i + 1, tr, "" if vl is None else vl])
             print(f"Saved training history -> {history_csv}")
 
+        # Restore the best checkpoint so the caller gets the lowest-val-loss weights.
         if best_state is not None:
             self.model.load_state_dict(best_state)
             print(f"Restored best model state (Validation Loss: {best_val_loss:.8f})")
 
     def cross_validate(self, X, y, data_processor, k_folds=5):
+        # Stratified k-fold is not used because the target is continuous;
+        # a fixed random_state ensures reproducibility across hyperparameter trials.
         kfold = KFold(n_splits=k_folds, shuffle=True, random_state=DataConfig.RANDOM_STATE)
         fold_results = []
 
@@ -132,6 +147,7 @@ class DataDrivenModel(BaseModel):
             train_loader = self.prepare_dataloader(X_train_fold, y_train_fold)
             val_loader = self.prepare_dataloader(X_val_fold, y_val_fold)
 
+            # Reset weights before each fold so folds are independent.
             self.model.apply(self.reset_weights)
             self.train(train_loader, val_loader=val_loader, live_plot=False)
 
@@ -148,6 +164,8 @@ class DataDrivenModel(BaseModel):
         best_params = None
         best_loss = float('inf')
 
+        # Exhaustive grid search over lr × batch_size; small grid kept tractable
+        # by using a reduced epoch budget (EPOCHS_CV) during cross-validation.
         hyperparameter_combinations = list(product(
             param_grid['lr'],
             param_grid['batch_size'],
