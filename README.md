@@ -220,7 +220,7 @@ python prepare_ship_data.py kastor   # merge raw CSVs into DANAE's schema
 | **5 Few-shot** | PI-NODE reaches ~3–4% MAPE from as little as **1% of target data**; DATA needs far more and stays ~8% on KASTOR even at 25%. |
 | **Ablation** | Freezing the learnable propeller triples the error (312 → 941 kW) — the learnable B-series characteristic is the decisive component. |
 | **Multi-seed** | 286.42 ± 9.89 kW over 5 seeds — robust, not a lucky run; confirms ablation deltas (no_ode/no_weather) are seed noise. |
-| **Uncertainty** | Deep ensemble best (278.4 kW, 51.4% coverage) but both UQ methods under-calibrated → conformal/temperature-scaling is future work. |
+| **Uncertainty** | Deep ensemble best (278.4 kW). Raw intervals under-calibrated (51.4% coverage), but post-hoc **split conformal** (`calibrate_uncertainty.py`) restores ~90/95% coverage on a held-out test half — and stays robust on MC-Dropout where Gaussian temperature scaling blows up. See `docs/PAPER_FINDINGS.md` §8, Fig. F10. |
 
 **Defining result:** physics-informed architectures provide disproportionately larger benefits precisely when needed most — on unseen vessels and in the low-data regime.
 
