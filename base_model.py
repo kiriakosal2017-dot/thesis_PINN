@@ -1,3 +1,9 @@
+"""Shared MLP architecture and training infrastructure used by all tabular model variants.
+
+Defines the ``ShipSpeedPredictor`` network, the ``BaseModel`` training harness, global
+seeding, and device selection so individual model scripts contain only variant-specific
+logic.
+"""
 import random
 
 import torch
@@ -18,6 +24,7 @@ def set_global_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+    # CUDA uses a separate per-device seed pool; set all at once to cover multi-GPU.
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
@@ -26,6 +33,8 @@ def initialize_weights(model):
     """Apply Kaiming uniform initialization for consistent comparison across models."""
     for layer in model.modules():
         if isinstance(layer, nn.Linear):
+            # Kaiming uniform is variance-consistent for ReLU activations and reduces
+            # sensitivity to depth when comparing shallow vs. deep MLP configs.
             nn.init.kaiming_uniform_(layer.weight, nonlinearity='relu')
             if layer.bias is not None:
                 nn.init.zeros_(layer.bias)
@@ -40,12 +49,15 @@ class ShipSpeedPredictor(nn.Module):
         if not hidden_layers:
             raise ValueError("hidden_layers must contain at least one hidden size")
 
+        # Build the layer stack dynamically so depth/width is controlled from config
+        # without subclassing for each variant.
         layers = []
         in_features = input_size
         for hidden_size in hidden_layers:
             layers.append(nn.Linear(in_features, int(hidden_size)))
             layers.append(nn.ReLU())
             in_features = int(hidden_size)
+        # Final linear projects to a single scalar (shaft power in kW).
         layers.append(nn.Linear(in_features, 1))
         self.network = nn.Sequential(*layers)
 
@@ -67,6 +79,8 @@ class BaseModel:
         self.hidden_layers = hidden_layers or [128, 64, 32, 16]
         self.device = self._get_device()
 
+        # Seed here (not at script entry) so subclass constructors that create
+        # additional tensors also start from a deterministic state.
         set_global_seed(DataConfig.RANDOM_STATE)
 
         self.model = ShipSpeedPredictor(input_size, hidden_layers=self.hidden_layers).to(self.device)
@@ -74,6 +88,9 @@ class BaseModel:
 
     @staticmethod
     def _get_device():
+        # Prefer CUDA, fall back to MPS (Apple Silicon), then CPU.
+        # MPS is checked separately because it is unavailable on Linux/Windows
+        # and raises no error when simply not present.
         if torch.cuda.is_available():
             device = torch.device("cuda")
             print("Using NVIDIA GPU with CUDA")
@@ -86,6 +103,8 @@ class BaseModel:
         return device
 
     def get_optimizer(self):
+        # Lazy construction via lambdas avoids instantiating every optimizer
+        # when only one is needed.
         optimizers = {
             'Adam': lambda: optim.Adam(
                 self.model.parameters(), lr=self.lr, weight_decay=TrainingConfig.WEIGHT_DECAY
@@ -97,6 +116,8 @@ class BaseModel:
             'RMSprop': lambda: optim.RMSprop(
                 self.model.parameters(), lr=self.lr, weight_decay=TrainingConfig.WEIGHT_DECAY
             ),
+            # LBFGS is a full-batch second-order method; strong_wolfe line search
+            # improves convergence for the physics residual loss used in PI-NODE.
             'LBFGS': lambda: optim.LBFGS(
                 self.model.parameters(), lr=self.lr,
                 max_iter=20, history_size=10, line_search_fn="strong_wolfe"
@@ -118,6 +139,8 @@ class BaseModel:
         return functions[self.loss_function_choice]()
 
     def _effective_batch_size(self, data_length):
+        # LBFGS requires the full dataset per step to compute accurate curvature;
+        # mini-batches break its line search guarantees.
         if self.optimizer_choice == 'LBFGS':
             return data_length
         return self.batch_size
@@ -127,6 +150,8 @@ class BaseModel:
         y_tensor = torch.tensor(y.values, dtype=torch.float32).view(-1, 1).to(self.device)
 
         dataset = TensorDataset(X_tensor, y_tensor)
+        # shuffle=False preserves the chronological order of ship voyage data,
+        # which matters for time-series integrity during evaluation.
         return DataLoader(
             dataset,
             batch_size=self._effective_batch_size(len(X)),
@@ -134,6 +159,8 @@ class BaseModel:
         )
 
     def prepare_unscaled_dataloader(self, X_unscaled):
+        # Unscaled features are fed to the physics branch (propeller law, resistance
+        # curves) which require dimensional inputs in SI / original units.
         X_tensor = torch.tensor(X_unscaled.values, dtype=torch.float32).to(self.device)
 
         dataset = TensorDataset(X_tensor)
@@ -154,6 +181,8 @@ class BaseModel:
             loss = loss_function(outputs, y_eval_tensor)
             print(f"\n{dataset_type} Loss: {loss.item():.8f}")
 
+            # Inverse-transform to kW so the printed RMSE is interpretable
+            # without knowing the scaling parameters.
             if data_processor:
                 outputs_original = data_processor.inverse_transform_y(outputs.cpu().numpy())
                 y_eval_original = data_processor.inverse_transform_y(y_eval_tensor.cpu().numpy())

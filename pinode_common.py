@@ -21,6 +21,9 @@ def load_danae_temporal_sequences(meta_exclude=("dt", "acceleration")):
     branches. Pass ``('dt',)`` to deliberately include ``acceleration`` as a
     feature (the "with_acceleration" ablation).
     """
+    # Propeller-Shaft-RPM is dropped globally in DataConfig for tabular models
+    # but the PI-NODE physics branch requires it; ensure it is present before
+    # loading temporal data.
     if "Propeller-Shaft-RPM" in DataConfig.DROP_COLUMNS:
         DataConfig.DROP_COLUMNS.remove("Propeller-Shaft-RPM")
 
@@ -28,8 +31,12 @@ def load_danae_temporal_sequences(meta_exclude=("dt", "acceleration")):
     res = proc.load_and_prepare_temporal_data()
     if res is None:
         raise RuntimeError("Failed to load DANAE temporal data")
+    # Unpack the eight-element tuple; the last two elements (scalers) are
+    # accessed through proc directly and not needed here.
     X_train, X_test, X_train_uns, X_test_uns, y_train, y_test, _, _ = res
 
+    # Build a column-name -> index map used by the PI-NODE to address specific
+    # physics inputs (RPM, speed, etc.) without hardcoding column positions.
     feature_indices = {c: i for i, c in enumerate(X_train.columns)}
     calm_idx, weather_idx = split_calm_weather_indices(X_train.columns, exclude=meta_exclude)
 
@@ -43,6 +50,9 @@ def make_loaders(model, train_tuple, test_tuple, val_frac=0.2):
     """Build chronological train/val/test sequence loaders for a PINODE model."""
     X_tr_seq, X_tr_uns_seq, y_tr_seq = train_tuple
     X_te_seq, X_te_uns_seq, y_te_seq = test_tuple
+
+    # Reserve the last val_frac of the training window as validation; taking
+    # the tail preserves temporal ordering and avoids leaking future data.
     n_val = int(len(X_tr_seq) * val_frac)
 
     train_loader = model.prepare_sequence_dataloader(
@@ -51,6 +61,8 @@ def make_loaders(model, train_tuple, test_tuple, val_frac=0.2):
     val_loader = model.prepare_sequence_dataloader(
         X_tr_seq[-n_val:], X_tr_uns_seq[-n_val:], y_tr_seq[-n_val:], shuffle=False
     )
+    # Test set is never shuffled to allow aligned comparison of predicted vs.
+    # true power traces along the voyage timeline.
     test_loader = model.prepare_sequence_dataloader(
         X_te_seq, X_te_uns_seq, y_te_seq, shuffle=False
     )
@@ -63,8 +75,12 @@ def predict_power(model, loader, mc_dropout=False):
     If ``mc_dropout`` is True, dropout layers are kept active (stochastic forward
     pass) for Monte-Carlo Dropout uncertainty estimation.
     """
+    # Start in eval mode to disable batch-norm running-stat updates; dropout
+    # is selectively re-enabled below only for the MC-Dropout UQ path.
     model.model.eval()
     if mc_dropout:
+        # Re-enable dropout while keeping all other layers in eval mode so that
+        # repeated forward passes sample from the approximate posterior.
         for m in model.model.modules():
             if isinstance(m, torch.nn.Dropout):
                 m.train()
@@ -74,9 +90,14 @@ def predict_power(model, loader, mc_dropout=False):
         for X_b, X_uns_b, y_b in loader:
             X_b = X_b.to(model.device)
             X_uns_b = X_uns_b.to(model.device)
+            # The PI-NODE head returns angular velocity (w), thrust (t) and
+            # rotative efficiency (eta_r); analytical power is derived from these.
             w, t, eta_r = model.model(X_b)
+            # Use only the last time-step of the unscaled sequence as the physics
+            # inputs because shaft-power is predicted for that instant.
             P_kw, _, _, _, _ = model.compute_analytical_power(w, t, eta_r, X_uns_b[:, -1, :])
             preds.append(P_kw.cpu().numpy())
+            # Inverse-transform labels to kW to match the unit of P_kw.
             true.append(model.data_processor.inverse_transform_y(y_b.numpy()))
 
     preds = np.concatenate(preds).reshape(-1)
@@ -87,5 +108,7 @@ def predict_power(model, loader, mc_dropout=False):
 def rmse_mape(preds, true):
     """Compute RMSE (kW) and MAPE (%). MAPE denominator is floored at 100 kW."""
     rmse = float(np.sqrt(np.mean((preds - true) ** 2)))
+    # Floor the denominator at 100 kW to prevent near-zero true-power samples
+    # (manoeuvring / drift conditions) from inflating MAPE to unrealistic levels.
     mape = float(np.mean(np.abs((preds - true) / np.maximum(np.abs(true), 100.0))) * 100)
     return rmse, mape
