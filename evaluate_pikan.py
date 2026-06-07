@@ -43,7 +43,8 @@ def main():
         kan_width=[in_size] + KAN_WIDTH_TAIL,
         lr=0.001,
         epochs=TrainingConfig.EPOCHS_FINAL,
-        batch_size=64,
+        batch_size=512,
+        seed=DataConfig.RANDOM_STATE,
     )
     print(f"PI-KAN trainable params: {model.n_params()}")
 

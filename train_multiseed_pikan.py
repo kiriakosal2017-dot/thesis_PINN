@@ -16,7 +16,6 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from base_model import set_global_seed
 from config import TrainingConfig
 from main_HYBRID import _build_feature_indices
 from main_PI_KAN import PIKANModel
@@ -71,14 +70,17 @@ def main():
             print(f"[skip] seed {seed} already in {out_csv}")
             continue
         print("\n" + "=" * 70 + f"\nSEED {seed}\n" + "=" * 70)
-        set_global_seed(seed)
 
+        # seed= is applied INSIDE the constructor (after BaseModel.__init__ resets the
+        # RNG), so each seed genuinely differs. batch_size=512 + CPU (force_cpu default)
+        # keep the physics-guided KAN training stable and numerically correct.
         model = PIKANModel(
             input_size=in_size,
             kan_width=[in_size] + KAN_WIDTH_TAIL,
             lr=0.001,
             epochs=args.epochs,
-            batch_size=64,
+            batch_size=512,
+            seed=seed,
         )
         train_loader = model.prepare_combined_dataloader(X_tr, X_tr_un, y_tr, shuffle=True)
         val_loader = model.prepare_dataloader(X_val, y_val)

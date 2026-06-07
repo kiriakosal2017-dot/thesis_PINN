@@ -4,8 +4,10 @@ PIKANModel subclasses UnifiedPhysicsHybridModel and replaces ONLY the backbone
 (MLP -> KAN). All physics, training, dataloaders, and evaluation are inherited unchanged,
 isolating MLP-vs-KAN as the single variable in the comparison with PI-NODE.
 """
+import torch
 from sklearn.model_selection import train_test_split
 
+from base_model import set_global_seed
 from config import DataConfig, TrainingConfig
 from kan_layer import KAN
 from main_HYBRID import UnifiedPhysicsHybridModel, _build_feature_indices
@@ -14,9 +16,10 @@ from read_data import DataProcessor
 
 class PIKANModel(UnifiedPhysicsHybridModel):
     def __init__(self, input_size, kan_width=None, grid_size=5, spline_order=3,
-                 lr=0.001, epochs=1000, batch_size=64,
+                 lr=0.001, epochs=1000, batch_size=512,
                  optimizer_choice="Adam", loss_function_choice="MSE",
-                 alpha=1.0, beta=0.05, gamma=0.05, delta=0.02):
+                 alpha=1.0, beta=0.05, gamma=0.05, delta=0.02,
+                 seed=None, force_cpu=True):
         # Build HYBRID (which builds an MLP we immediately discard) to inherit all
         # physics + training state, then swap in the KAN backbone.
         super().__init__(
@@ -24,6 +27,18 @@ class PIKANModel(UnifiedPhysicsHybridModel):
             optimizer_choice=optimizer_choice, loss_function_choice=loss_function_choice,
             alpha=alpha, beta=beta, gamma=gamma, delta=delta,
         )
+        # The Apple-MPS backend miscomputes the KAN's B-spline double-backward
+        # (the 2nd-order autograd path used by the PINN PDE residual), which silently
+        # collapses training to a near-constant (mean-power) predictor. The CPU path is
+        # numerically correct, so PI-KAN trains on CPU by default. (The MLP-based HYBRID
+        # is unaffected and still uses the accelerator.)
+        if force_cpu:
+            self.device = torch.device("cpu")
+        # BaseModel.__init__ called set_global_seed(RANDOM_STATE), overriding any caller
+        # seed. Re-seed HERE (after super, before building the KAN) so multi-seed runs
+        # actually differ — the KAN weight init and the loader shuffle both consume this.
+        if seed is not None:
+            set_global_seed(seed)
         self.kan_width = kan_width or [input_size, 64, 32, 1]
         if self.kan_width[0] != input_size or self.kan_width[-1] != 1:
             raise ValueError(
@@ -62,7 +77,8 @@ if __name__ == "__main__":
         kan_width=[in_size, 64, 32, 1],
         lr=1e-3,
         epochs=TrainingConfig.EPOCHS_FINAL,
-        batch_size=64,
+        batch_size=512,
+        seed=DataConfig.RANDOM_STATE,
     )
     print(f"PI-KAN trainable params: {model.n_params()}")
 
