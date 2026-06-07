@@ -1,8 +1,6 @@
-"""Train the full PI-NODE under N random seeds for statistical significance.
-
-Produces a mean +/- std of test RMSE/MAPE (answers "was the result a lucky seed?")
-and saves one checkpoint per seed, which double as the members of the deep-ensemble
-used by evaluate_uncertainty.py.
+"""Train the PI-NODE under N random seeds to assess result stability and produce
+a confidence interval for test RMSE/MAPE.  Each per-seed checkpoint is later
+reused as a member of the deep ensemble in evaluate_uncertainty.py.
 
 Usage:
     python train_multiseed.py                  # 5 seeds, full protocol
@@ -20,6 +18,8 @@ from pinode_common import (
     load_danae_temporal_sequences, make_loaders, predict_power, rmse_mape,
 )
 
+# Physics regularization weights fixed to the sweep winner across all seeds so
+# the only source of variance is weight initialisation and data-loader shuffling.
 LAMBDA_RANGE, LAMBDA_CURV, LAMBDA_PRIOR = 0.25, 0.01, 0.001
 
 
@@ -33,7 +33,8 @@ def main():
     results_dir.mkdir(exist_ok=True)
     out_csv = results_dir / "multiseed_results.csv"
 
-    # Resume: keep seeds already recorded in the CSV and skip re-running them.
+    # Resume-from-CSV: read any previously completed seeds and skip them.
+    # This lets a run be interrupted and restarted without wasting compute.
     rows = []
     done = set()
     if out_csv.exists():
@@ -43,7 +44,8 @@ def main():
         if done:
             print(f"Resuming — seeds already done: {sorted(done)}; will skip these.")
 
-    # Data/sequences are identical across seeds — load once.
+    # Preprocessing is deterministic and shared across seeds, so load once rather
+    # than repeating the I/O and scaling inside each iteration.
     proc, feature_indices, calm_idx, weather_idx, train_tuple, test_tuple = \
         load_danae_temporal_sequences()
 
@@ -55,6 +57,8 @@ def main():
         print(f"SEED {seed}")
         print("=" * 70)
 
+        # A fresh model instance is constructed for each seed so that the seed
+        # is applied before any weight tensors are allocated.
         model = PINODEPropellerModel(
             input_size=train_tuple[0].shape[2],
             feature_indices=feature_indices,
@@ -76,6 +80,8 @@ def main():
 
         train_loader, val_loader, test_loader = make_loaders(model, train_tuple, test_tuple)
 
+        # Best-validation checkpoint written to a seed-specific path so all N
+        # checkpoints persist and can be loaded together as a deep ensemble.
         ckpt = str(results_dir / f"best_model_PI_NODE_seed{seed}.pt")
         model.train(train_loader, val_loader=val_loader, checkpoint_path=ckpt)
 
@@ -84,6 +90,7 @@ def main():
         print(f"\n[seed {seed}] Test RMSE = {rmse:.2f} kW | MAPE = {mape:.2f}%")
         rows.append({"seed": seed, "test_rmse_kw": round(rmse, 2), "test_mape_pct": round(mape, 3)})
 
+        # Write after every seed so a crash only loses the seed currently in flight.
         with open(out_csv, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
             writer.writeheader()
@@ -94,6 +101,8 @@ def main():
     print("\n" + "=" * 70)
     print(f"MULTI-SEED SUMMARY ({len(rows)} seeds)")
     print("=" * 70)
+    # ddof=1 gives the unbiased sample standard deviation, appropriate when
+    # reporting a confidence interval over a small number of seeds.
     print(f"  RMSE: {rmses.mean():.2f} +/- {rmses.std(ddof=1):.2f} kW")
     print(f"  MAPE: {mapes.mean():.3f} +/- {mapes.std(ddof=1):.3f} %")
     print(f"\nSaved -> {out_csv} (+ per-seed checkpoints for the deep ensemble)")
