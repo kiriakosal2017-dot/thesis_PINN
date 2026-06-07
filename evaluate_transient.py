@@ -1,4 +1,4 @@
-"""Split the DANAE test set into steady and transient regimes by |dV/dt| and
+"""Split the source vessel test set into steady and transient regimes by |dV/dt| and
 compare DATA, HYBRID, and PI-NODE error on each subset to assess whether physics
 inductive bias improves robustness during non-equilibrium operating conditions."""
 import pickle
@@ -23,7 +23,7 @@ def load_data():
         raise RuntimeError("Failed to load tabular data")
     X_train_tab, X_test_tab, _, _, y_train_tab, y_test_tab, _, _ = res_tab
 
-    # RPM is normally dropped to prevent leakage; the temporal branch needs it
+    # RPM is normally dropped to prevent leakage on the source vessel; the temporal branch needs it
     # because the ODE integrator uses rotational speed as a state variable.
     if "Propeller-Shaft-RPM" in DataConfig.DROP_COLUMNS:
         DataConfig.DROP_COLUMNS.remove("Propeller-Shaft-RPM")

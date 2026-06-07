@@ -1,4 +1,4 @@
-"""Train the final PI-NODE model on the DANAE dataset using the winning regularization
+"""Train the final PI-NODE model on the source vessel dataset using the winning regularization
 hyperparameters from the sweep, then persist the checkpoint and fitted data processor
 so downstream transfer-learning scripts can consume them directly.
 """
@@ -15,9 +15,9 @@ def main():
     if "Propeller-Shaft-RPM" in DataConfig.DROP_COLUMNS:
         DataConfig.DROP_COLUMNS.remove("Propeller-Shaft-RPM")
 
-    # Load and scale the full temporal dataset (DANAE); the processor is serialised
+    # Load and scale the full temporal dataset (source vessel); the processor is serialised
     # at the end so that transfer scripts share identical scaler state.
-    print("Loading temporal data (DANAE)...")
+    print("Loading temporal data (source vessel)...")
     proc = DataProcessor()
     res = proc.load_and_prepare_temporal_data()
     if res is None:

@@ -1,11 +1,11 @@
-"""Few-shot adaptation benchmark: fine-tune DANAE-pretrained DATA and PI-NODE models on
+"""Few-shot adaptation benchmark: fine-tune pretrained DATA and PI-NODE models on
 small fractions of a target vessel's training data, then evaluate on the target's held-out
 test set to quantify how quickly each architecture adapts to a new vessel.
 
 Usage:
-    cp .env.kastor .env
+    cp .env.target .env
     python -u evaluate_fewshot.py
-    cp .env.danae .env
+    cp .env.source .env
 """
 import os
 import copy
@@ -24,7 +24,7 @@ from main_PI_NODE_Propeller import PINODEPropellerModel
 # Data budgets as fractions of the target vessel's training set (≈1 %, 5 %, 10 %, 25 %).
 # Deliberately tiny to stress-test the physics-informed prior under data scarcity.
 FEWSHOT_FRACTIONS = [0.01, 0.05, 0.10, 0.25]
-# Conservative LR for fine-tuning — a full lr risks catastrophic forgetting of the DANAE prior.
+# Conservative LR for fine-tuning — a full lr risks catastrophic forgetting of the pretrained prior.
 FEWSHOT_LR = 1e-4
 FEWSHOT_EPOCHS = 50
 # Generous patience relative to epoch count; fine-tuning curves are noisier on small datasets.
@@ -38,8 +38,8 @@ def get_ship_name():
 
 
 def align_features_to_danae(X_target_unscaled, danae_feature_names):
-    # The target vessel may be missing some DANAE columns (different sensor suite).
-    # Fill unknowns with zero so the DANAE scaler can still transform the full feature vector.
+    # The target vessel may be missing some source vessel columns (different sensor suite).
+    # Fill unknowns with zero so the source vessel's scaler can still transform the full feature vector.
     import pandas as pd
     aligned = pd.DataFrame(0.0, index=X_target_unscaled.index, columns=danae_feature_names)
     common = [c for c in danae_feature_names if c in X_target_unscaled.columns]
@@ -49,7 +49,7 @@ def align_features_to_danae(X_target_unscaled, danae_feature_names):
 
 def load_target_data():
     # Propeller-Shaft-RPM must be present for PI-NODE's physics layer; re-add if it was
-    # dropped by the default DataConfig for a DANAE-only run.
+    # dropped by the default DataConfig for a source-vessel-only run.
     if "Propeller-Shaft-RPM" in DataConfig.DROP_COLUMNS:
         DataConfig.DROP_COLUMNS.remove("Propeller-Shaft-RPM")
 
@@ -78,14 +78,14 @@ def load_target_data():
 
 
 def finetune_data_model(frac, X_train_uns_tab, y_train_uns_tab, X_test_uns_tab, y_test_uns_tab, proc_tab):
-    # Load the DANAE scaler so all feature transforms stay consistent with the pretrained weights.
+    # Load the source vessel's scaler so all feature transforms stay consistent with the pretrained weights.
     with open("data_processor_danae.pkl", "rb") as f:
         proc_danae = pickle.load(f)
 
     danae_features = list(proc_danae.scaler_X.feature_names_in_)
     input_size = len(danae_features)
 
-    # Reconstruct the exact same architecture used during DANAE training, then load weights.
+    # Reconstruct the exact same architecture used during source vessel training, then load weights.
     model = DataDrivenModel(input_size=input_size, hidden_layers=[128, 64, 32],
                             lr=FEWSHOT_LR, epochs=FEWSHOT_EPOCHS, batch_size=64)
     state = torch.load("best_model_DATA_danae.pt", map_location=model.device, weights_only=True)
@@ -95,7 +95,7 @@ def finetune_data_model(frac, X_train_uns_tab, y_train_uns_tab, X_test_uns_tab, 
     n_ft = max(1, int(len(X_train_uns_tab) * frac))
     X_ft = align_features_to_danae(X_train_uns_tab.iloc[:n_ft], danae_features)
     X_ft_scaled = proc_danae.scaler_X.transform(X_ft)
-    # Use UNSCALED y, then scale with DANAE's scaler
+    # Use UNSCALED y, then scale with the source vessel's scaler
     y_ft_uns = y_train_uns_tab.iloc[:n_ft]
     y_ft_scaled = proc_danae.scaler_y.transform(y_ft_uns.values.reshape(-1, 1))
 
@@ -108,7 +108,7 @@ def finetune_data_model(frac, X_train_uns_tab, y_train_uns_tab, X_test_uns_tab, 
 
     model.train(train_loader, val_loader=val_loader, live_plot=False)
 
-    # Evaluate on the target vessel's full test set; invert with DANAE's scaler for kW units.
+    # Evaluate on the target vessel's full test set; invert with the source vessel's scaler for kW units.
     X_test_aligned = align_features_to_danae(X_test_uns_tab, danae_features)
     X_test_scaled = proc_danae.scaler_X.transform(X_test_aligned)
     X_te = torch.tensor(X_test_scaled, dtype=torch.float32).to(model.device)
@@ -126,7 +126,7 @@ def finetune_data_model(frac, X_train_uns_tab, y_train_uns_tab, X_test_uns_tab, 
 
 def finetune_pinode_model(frac, X_train_t, X_train_uns_t, y_train_t, y_train_uns_t,
                           X_test_t, X_test_uns_t, y_test_t, y_test_uns_t, proc_temp):
-    # Load the DANAE temporal scaler; must match the one used at pretraining time.
+    # Load the source vessel's temporal scaler; must match the one used at pretraining time.
     with open("data_processor_danae_temporal.pkl", "rb") as f:
         proc_danae = pickle.load(f)
 
@@ -135,7 +135,7 @@ def finetune_pinode_model(frac, X_train_t, X_train_uns_t, y_train_t, y_train_uns
 
     calm_water_indices, weather_indices = split_calm_weather_indices(danae_features)
 
-    # Instantiate PI-NODE with the same hyper-parameters used during DANAE pretraining
+    # Instantiate PI-NODE with the same hyper-parameters used during source vessel pretraining
     # so that the loaded state dict maps cleanly onto the model graph.
     input_size = len(danae_features)
     model = PINODEPropellerModel(
@@ -158,7 +158,7 @@ def finetune_pinode_model(frac, X_train_t, X_train_uns_t, y_train_t, y_train_uns
     n_ft = max(1, int(len(X_train_t) * frac))
     X_ft_uns = align_features_to_danae(X_train_uns_t.iloc[:n_ft], danae_features)
     X_ft_scaled = pd.DataFrame(proc_danae.scaler_X.transform(X_ft_uns), columns=danae_features, index=X_ft_uns.index)
-    # Use UNSCALED y, then scale with DANAE's scaler
+    # Use UNSCALED y, then scale with the source vessel's scaler
     y_ft_uns = y_train_uns_t.iloc[:n_ft]
     y_ft_scaled = pd.Series(proc_danae.scaler_y.transform(y_ft_uns.values.reshape(-1, 1)).flatten(),
                             index=y_ft_uns.index)
@@ -177,7 +177,7 @@ def finetune_pinode_model(frac, X_train_t, X_train_uns_t, y_train_t, y_train_uns
 
     model.train(train_loader, val_loader=val_loader, live_plot=False)
 
-    # Build test sequences; scale with DANAE's scaler to match the model's output space.
+    # Build test sequences; scale with the source vessel's scaler to match the model's output space.
     X_te_uns = align_features_to_danae(X_test_uns_t, danae_features)
     X_te_scaled = pd.DataFrame(proc_danae.scaler_X.transform(X_te_uns), columns=danae_features, index=X_te_uns.index)
     y_te_scaled = pd.Series(proc_danae.scaler_y.transform(y_test_uns_t.values.reshape(-1, 1)).flatten(),
@@ -199,7 +199,7 @@ def finetune_pinode_model(frac, X_train_t, X_train_uns_t, y_train_t, y_train_uns
             w, t, eta_r = model.model(X_b)
             P_kw, _, _, _, _ = model.compute_analytical_power(w, t, eta_r, X_uns_b[:, -1, :])
             all_preds.append(P_kw.cpu().numpy())
-            # y_b was scaled with DANAE's scaler, so decode with DANAE's scaler
+            # y_b was scaled with the source vessel's scaler, so decode with the source vessel's scaler
             all_true.append(proc_danae.inverse_transform_y(y_b.numpy()))
 
     preds = np.concatenate(all_preds).reshape(-1)
@@ -212,7 +212,7 @@ def finetune_pinode_model(frac, X_train_t, X_train_uns_t, y_train_t, y_train_uns
 def main():
     ship_name = get_ship_name()
     print(f"Few-Shot Fine-Tuning -> {ship_name}")
-    print(f"Models pre-trained on DANAE, fine-tuned on small subsets of {ship_name}\n")
+    print(f"Models pre-trained on the source vessel, fine-tuned on small subsets of {ship_name}\n")
 
     (proc_tab, X_train_tab, X_test_tab, X_train_uns_tab, X_test_uns_tab,
      y_train_tab, y_test_tab, y_train_uns_tab, y_test_uns_tab,
@@ -223,7 +223,7 @@ def main():
 
     results = []
     # Sweep over all data fractions; each iteration is an independent fine-tune from the same
-    # DANAE checkpoint so results across fractions are directly comparable.
+    # pretrained checkpoint so results across fractions are directly comparable.
     for frac in FEWSHOT_FRACTIONS:
         print(f"\n{'='*70}")
         print(f"  Few-Shot: {frac*100:.0f}% of training data")
@@ -249,7 +249,7 @@ def main():
 
     # Summary table: MAPE is the primary comparison metric; "Advantage" shows PI-NODE gain.
     print(f"\n{'='*70}")
-    print(f"SUMMARY: Few-Shot Fine-Tuning -> {ship_name}")
+    print(f"SUMMARY: Few-Shot Fine-Tuning on target vessel -> {ship_name}")
     print(f"{'='*70}")
     print(f"  {'Fraction':<10} {'Samples':>8} {'DATA MAPE':>12} {'PI-NODE MAPE':>14} {'Advantage':>12}")
     print(f"  {'-'*58}")

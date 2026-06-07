@@ -1,4 +1,4 @@
-"""Zero-shot cross-vessel transfer: load models trained on DANAE, swap propeller
+"""Zero-shot cross-vessel transfer: load models trained on the source vessel, swap propeller
 constants for the target vessel via the active .env, and evaluate without any
 retraining — only DATA, HYBRID, and PI-NODE inference paths are exercised."""
 import os
@@ -22,9 +22,9 @@ def get_ship_name():
 
 
 def align_features_to_danae(X_target_unscaled, danae_feature_names):
-    """Align target ship's features to match DANAE's training schema.
+    """Align target ship's features to match the source vessel's training schema.
 
-    Filling missing columns with 0 is valid because DANAE's StandardScaler will
+    Filling missing columns with 0 is valid because the source vessel's StandardScaler will
     map 0 to approximately −mean/std, which is a neutral out-of-distribution signal
     rather than an arbitrary extreme value.  Extra target columns are silently dropped.
     """
@@ -45,7 +45,7 @@ def load_target_data():
     (DATA/HYBRID) and the temporal path (PI-NODE) produce different feature sets
     and scalers — they must not share state.
     """
-    # RPM is dropped by default (leakage risk on DANAE) but the target ship
+    # RPM is dropped by default (leakage risk on the source vessel) but the target ship
     # may legitimately use it; re-enable it for the target evaluation pass.
     if "Propeller-Shaft-RPM" in DataConfig.DROP_COLUMNS:
         DataConfig.DROP_COLUMNS.remove("Propeller-Shaft-RPM")
@@ -69,18 +69,18 @@ def load_target_data():
 
 
 def evaluate_data_zeroshot(proc_tab_target, X_test_uns_tab, y_test_tab):
-    """Zero-shot DATA model: load DANAE weights, evaluate on target ship."""
+    """Zero-shot DATA model: load source vessel weights, evaluate on target ship."""
     print("\n--- DATA (Zero-Shot) ---")
 
-    # Restore the scaler fitted on DANAE — the target ship's data must be
-    # normalised with DANAE statistics, not re-fitted, to preserve the frozen weights.
+    # Restore the scaler fitted on the source vessel — the target ship's data must be
+    # normalised with the source vessel's statistics, not re-fitted, to preserve the frozen weights.
     with open("data_processor_danae.pkl", "rb") as f:
         proc_danae = pickle.load(f)
 
     danae_features = list(proc_danae.scaler_X.feature_names_in_)
     input_size = len(danae_features)
 
-    # Bring target features into DANAE's column order before scaling.
+    # Bring target features into the source vessel's column order before scaling.
     X_aligned = align_features_to_danae(X_test_uns_tab, danae_features)
 
     model = DataDrivenModel(input_size=input_size, hidden_layers=[128, 64, 32])
@@ -88,14 +88,14 @@ def evaluate_data_zeroshot(proc_tab_target, X_test_uns_tab, y_test_tab):
     model.model.load_state_dict(state)
     model.model.eval()
 
-    # Apply DANAE's scaler, not the target's, to stay in the model's training distribution.
+    # Apply the source vessel's scaler, not the target's, to stay in the model's training distribution.
     X_test_scaled = proc_danae.scaler_X.transform(X_aligned)
     X_t = torch.tensor(X_test_scaled, dtype=torch.float32).to(model.device)
 
     with torch.no_grad():
         preds_scaled = model.model(X_t).cpu().numpy()
 
-    # Inverse-transform predictions via DANAE's y-scaler; ground truth via target's.
+    # Inverse-transform predictions via the source vessel's y-scaler; ground truth via target's.
     preds_kw = proc_danae.inverse_transform_y(preds_scaled)
     true_kw = proc_tab_target.inverse_transform_y(y_test_tab.values.reshape(-1, 1))
 
@@ -107,7 +107,8 @@ def evaluate_data_zeroshot(proc_tab_target, X_test_uns_tab, y_test_tab):
 
 def evaluate_hybrid_zeroshot(proc_tab_target, X_test_uns_tab, y_test_tab):
     """Zero-shot HYBRID model: same inference path as DATA because the physics
-    regulariser only modifies the training loss — at inference the model is a plain MLP."""
+    regulariser only modifies the training loss — at inference the model is a plain MLP.
+    Loads weights trained on the source vessel."""
     print("\n--- HYBRID (Zero-Shot) ---")
 
     with open("data_processor_danae.pkl", "rb") as f:
@@ -139,7 +140,7 @@ def evaluate_hybrid_zeroshot(proc_tab_target, X_test_uns_tab, y_test_tab):
 
 
 def evaluate_pinode_zeroshot(proc_temp_target, X_train_t, X_test_t, X_train_uns_t, X_test_uns_t, y_test_t):
-    """Zero-shot PI-NODE: frozen DANAE neural-network weights, target vessel's propeller constants.
+    """Zero-shot PI-NODE: frozen source-vessel neural-network weights, target vessel's propeller constants.
 
     The physical constants D (diameter), Z (blade count), and P/D (pitch ratio) are read
     from PropellerConfig, which is populated from the active .env at import time.  The NN
@@ -152,7 +153,7 @@ def evaluate_pinode_zeroshot(proc_temp_target, X_train_t, X_test_t, X_train_uns_
     with open("data_processor_danae_temporal.pkl", "rb") as f:
         proc_danae = pickle.load(f)
 
-    # Feature ordering and scaler come from DANAE; the model expects exactly these columns.
+    # Feature ordering and scaler come from the source vessel; the model expects exactly these columns.
     danae_features = list(proc_danae.scaler_X.feature_names_in_)
     feature_indices = {c: i for i, c in enumerate(danae_features)}
 
@@ -160,7 +161,7 @@ def evaluate_pinode_zeroshot(proc_temp_target, X_train_t, X_test_t, X_train_uns_
 
     input_size = len(danae_features)
 
-    # Instantiate with DANAE's architecture; PropellerConfig already holds the target
+    # Instantiate with the source vessel's architecture; PropellerConfig already holds the target
     # vessel's D/Z/P_D because .env was swapped before this script was invoked.
     model = PINODEPropellerModel(
         input_size=input_size,
@@ -178,7 +179,7 @@ def evaluate_pinode_zeroshot(proc_temp_target, X_train_t, X_test_t, X_train_uns_
     model.model.eval()
 
     import pandas as pd
-    # Align target features to DANAE's column schema before applying DANAE's scaler.
+    # Align target features to the source vessel's column schema before applying the source vessel's scaler.
     X_test_uns_aligned = align_features_to_danae(X_test_uns_t, danae_features)
 
     X_test_scaled = proc_danae.scaler_X.transform(X_test_uns_aligned)
@@ -203,7 +204,7 @@ def evaluate_pinode_zeroshot(proc_temp_target, X_train_t, X_test_t, X_train_uns_
             X_uns_last = X_uns_batch[:, -1, :]
             P_kw, _, _, _, _ = model.compute_analytical_power(w, t, eta_r, X_uns_last)
             all_preds.append(P_kw.cpu().numpy())
-            # Ground truth is inverse-transformed by the target's scaler, not DANAE's.
+            # Ground truth is inverse-transformed by the target's scaler, not the source vessel's.
             y_true_kw = proc_temp_target.inverse_transform_y(y_batch.numpy())
             all_true.append(y_true_kw)
 
@@ -219,7 +220,7 @@ def evaluate_pinode_zeroshot(proc_temp_target, X_train_t, X_test_t, X_train_uns_
 def main():
     ship_name = get_ship_name()
     print(f"Zero-shot transfer learning -> {ship_name}")
-    print(f"Models trained on DANAE, evaluated on {ship_name} (no retraining)\n")
+    print(f"Models trained on the source vessel, evaluated on {ship_name} (no retraining)\n")
 
     (proc_tab, X_test_tab, X_test_uns_tab, y_test_tab,
      proc_temp, X_train_t, X_test_t, X_train_uns_t, X_test_uns_t, y_test_t) = load_target_data()
@@ -231,14 +232,14 @@ def main():
 
     print("\n" + "=" * 70)
     print(f"Zero-shot transfer summary -> {ship_name}")
-    print(f"(All models trained on DANAE, no retraining on {ship_name})")
+    print(f"(All models trained on the source vessel, no retraining on {ship_name})")
     print("=" * 70)
     print(f"  {'Model':<12} {'RMSE (kW)':>12} {'MAPE':>10}")
     print(f"  {'-' * 36}")
     for r in results:
         print(f"  {r['model']:<12} {r['rmse']:>10.2f}kW {r['mape']:>9.2f}%")
 
-    print(f"\n  Reference (trained ON DANAE):")
+    print(f"\n  Reference (trained on source vessel):")
     print(f"  {'DATA':<12} {'424.80':>10}kW {'5.73':>9}%")
     print(f"  {'HYBRID':<12} {'703.69':>10}kW {'8.88':>9}%")
     print(f"  {'PI-NODE':<12} {'275.95':>10}kW {'3.10':>9}%")

@@ -1,4 +1,4 @@
-"""Ablation study for the PI-NODE architecture (source domain: DANAE).
+"""Ablation study for the PI-NODE architecture (source domain: training vessel).
 
 Trains the full PI-NODE and several ablated variants under the identical protocol,
 then reports each variant's test RMSE/MAPE so the contribution of each architectural

@@ -1,4 +1,4 @@
-"""Predictive uncertainty evaluation for the PI-NODE (source domain: DANAE).
+"""Predictive uncertainty evaluation for the PI-NODE (source domain: training vessel).
 
 Two complementary estimates of predictive uncertainty:
 
@@ -89,7 +89,7 @@ def main():
     _, _, test_loader = make_loaders(base, train_tuple, test_tuple)
 
     print("=" * 70)
-    print("PI-NODE Uncertainty Quantification (DANAE test set)")
+    print("PI-NODE Uncertainty Quantification (source vessel test set)")
     print("=" * 70)
 
     # --- MC-Dropout on the single main checkpoint ---

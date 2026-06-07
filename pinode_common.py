@@ -1,6 +1,6 @@
 """Shared helpers for PI-NODE ablation / multi-seed / uncertainty experiments.
 
-Centralises the DANAE temporal data loading, sequence building, calm/weather
+Centralises the source vessel temporal data loading, sequence building, calm/weather
 feature split, loader construction and metric computation so the experiment
 scripts stay short and consistent with the main training pipeline.
 """
@@ -12,7 +12,7 @@ from config import DataConfig, SequenceConfig
 
 
 def load_danae_temporal_sequences(meta_exclude=("dt", "acceleration")):
-    """Load DANAE temporal data and build train/test sequences.
+    """Load source vessel temporal data and build train/test sequences.
 
     Returns: (proc, feature_indices, calm_idx, weather_idx, train_tuple, test_tuple)
     where each *_tuple is (X_seq, X_unscaled_seq, y_seq).
@@ -23,14 +23,14 @@ def load_danae_temporal_sequences(meta_exclude=("dt", "acceleration")):
     """
     # Propeller-Shaft-RPM is dropped globally in DataConfig for tabular models
     # but the PI-NODE physics branch requires it; ensure it is present before
-    # loading temporal data.
+    # loading source vessel temporal data.
     if "Propeller-Shaft-RPM" in DataConfig.DROP_COLUMNS:
         DataConfig.DROP_COLUMNS.remove("Propeller-Shaft-RPM")
 
     proc = DataProcessor()
     res = proc.load_and_prepare_temporal_data()
     if res is None:
-        raise RuntimeError("Failed to load DANAE temporal data")
+        raise RuntimeError("Failed to load source vessel temporal data")
     # Unpack the eight-element tuple; the last two elements (scalers) are
     # accessed through proc directly and not needed here.
     X_train, X_test, X_train_uns, X_test_uns, y_train, y_test, _, _ = res

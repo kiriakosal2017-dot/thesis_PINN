@@ -131,7 +131,7 @@ def get_loss_history(model):
 # --------------------------------------------------------------------------- #
 # Numeric tables (provenance: docs/EXPERIMENT_RUNBOOK.md + training logs)
 # --------------------------------------------------------------------------- #
-# F2 source-domain test RMSE (kW) on DANAE.
+# F2 source-domain test RMSE (kW) on the source vessel.
 # PI-NODE/DATA/HYBRID are single canonical runs; PI-KAN is the 5-seed mean with
 # ±std error bar sourced from results/multiseed_pikan_results.csv.
 SOURCE_RMSE = {"PI-NODE": 312.52, "PI-KAN": 471.04, "DATA": 557.52, "HYBRID": 583.88}
@@ -154,7 +154,7 @@ TRANSFER = {  # ship: {model: mape}
 }
 
 # F5 few-shot MAPE (%) by training-data fraction.  DATA vs PI-NODE.
-# MENELAOS 25% PI-NODE not yet available (run interrupted) -> None.
+# A target vessel's 25% PI-NODE not yet available (run interrupted) -> None.
 FEWSHOT = {
     "KASTOR": {
         "frac":    [1, 5, 10, 25],
@@ -168,7 +168,7 @@ FEWSHOT = {
     },
 }
 
-# F7 ablation (DANAE) — source: results/ablation_results.csv
+# F7 ablation (source vessel) — source: results/ablation_results.csv
 ABLATION = [  # (label, test_rmse_kw, mape)
     ("full",              312.52, 3.575),
     ("− neural ODE",      286.95, 3.670),
@@ -177,17 +177,17 @@ ABLATION = [  # (label, test_rmse_kw, mape)
     ("+ acceleration",    285.91, 3.418),
 ]
 
-# F8 multi-seed (DANAE) — source: results/multiseed_results.csv
+# F8 multi-seed (source vessel) — source: results/multiseed_results.csv
 MULTISEED_RMSE = [290.59, 288.99, 289.97, 293.54, 268.99]  # seeds 0..4
 MULTISEED_MEAN, MULTISEED_SD = 286.42, 9.89
 
-# F9 uncertainty (DANAE) — source: uq_rerun.log
+# F9 uncertainty (source vessel) — source: uq_rerun.log
 UQ = [  # (method, rmse_kw, mean_std_kw, coverage95_pct)
     ("MC-Dropout\n(K=30)", 310.98, 22.96, 15.6),
     ("Deep Ensemble\n(M=5)", 278.36, 62.13, 51.4),
 ]
 
-# F10 calibration (DANAE test eval-half) — source: results/calibration_results.csv
+# F10 calibration (source vessel, test eval-half) — source: results/calibration_results.csv
 # Deep-Ensemble empirical coverage per method at each target level.
 CALIBRATION = {
     0.90: {"raw": 0.4524, "temperature": 0.9566, "conformal": 0.9078},
@@ -199,7 +199,7 @@ CALIBRATION = {
 # Figures
 # --------------------------------------------------------------------------- #
 def fig_loss_curves():
-    """F1: training & validation loss per model (DANAE source domain)."""
+    """F1: training & validation loss per model (source domain)."""
     # sharey=False because loss scales differ substantially across model families;
     # log-scale y-axis makes convergence visible even when final loss is very small.
     fig, axes = plt.subplots(1, 3, figsize=(13, 4), sharey=False)
@@ -222,7 +222,7 @@ def fig_loss_curves():
         ax.set_yscale("log")
         ax.legend()
     axes[0].set_ylabel("Loss (MSE, scaled)")
-    fig.suptitle("Training / validation loss (DANAE)", y=1.02)
+    fig.suptitle("Training / validation loss (source vessel)", y=1.02)
     save(fig, "F1_loss_curves")
 
 
@@ -241,7 +241,7 @@ def fig_source_rmse():
         ax.text(b.get_x() + b.get_width() / 2, v + e + 8, label,
                 ha="center", va="bottom", fontsize=9)
     ax.set_ylabel("Test RMSE (kW)")
-    ax.set_title("Source-domain accuracy (DANAE)")
+    ax.set_title("Source-domain accuracy")
     ax.set_ylim(0, max(v + e for v, e in zip(vals, errs)) * 1.15)
     save(fig, "F2_source_rmse")
 
@@ -274,8 +274,8 @@ def fig_transient():
 
 def fig_transfer():
     """F4: zero-shot transfer MAPE per target vessel (no fine-tuning)."""
-    # KASTOR and MENELAOS are sister vessels to DANAE so PI-NODE transfers well;
-    # THALIA and THISSEAS differ more in hull form, which explains the larger gap.
+    # The two nearer sister vessels show lower transfer error for PI-NODE;
+    # the vessels with more distinct hull forms show a larger gap.
     # Width w=0.26 with j-1 centering keeps three bars tightly grouped under each ship label.
     ships = list(TRANSFER.keys())
     fig, ax = plt.subplots(figsize=(9, 4.5))
@@ -337,7 +337,7 @@ def fig_ablation():
         ax.text(b.get_x() + b.get_width() / 2, v + 12, f"{v:.0f}",
                 ha="center", va="bottom", fontsize=9)
     ax.set_ylabel("Test RMSE (kW)")
-    ax.set_title("Ablation on DANAE — learnable propeller is decisive")
+    ax.set_title("Ablation: learnable propeller is decisive")
     ax.set_ylim(0, max(rmse) * 1.12)
     ax.legend()
     plt.setp(ax.get_xticklabels(), rotation=15, ha="right")
@@ -368,13 +368,13 @@ def fig_multiseed():
     ax.set_xlabel("Seed")
     ax.set_ylabel("Test RMSE (kW)")
     ax.set_ylim(0, SOURCE_RMSE["HYBRID"] * 1.1)
-    ax.set_title("Multi-seed stability (DANAE) — PI-NODE far below baselines")
+    ax.set_title("Multi-seed stability — PI-NODE far below baselines")
     ax.legend(loc="center right", fontsize=9)
     save(fig, "F8_multiseed")
 
 
 def fig_uncertainty():
-    """F9: empirical 95% prediction-interval coverage per UQ method (DANAE)."""
+    """F9: empirical 95% prediction-interval coverage per UQ method (source vessel)."""
     # Both MC-Dropout and Deep Ensemble under-cover relative to the nominal 95%
     # line; the gap motivates the post-hoc recalibration shown in F10.
     # RMSE is annotated alongside coverage so the accuracy/uncertainty trade-off
@@ -400,7 +400,7 @@ def fig_calibration():
     # Three methods compared at both the 90% and 95% target levels.  The dashed
     # horizontal lines are the ideal targets; conformal prediction hits them by
     # construction on the calibration split, which is why it lands closest.
-    # Source data: results/calibration_results.csv (Deep Ensemble, DANAE test eval-half).
+    # Source data: results/calibration_results.csv (Deep Ensemble, source vessel test eval-half).
     methods = ["raw", "temperature", "conformal"]
     colors = {"raw": "#b2182b", "temperature": "#f1a340", "conformal": "#1b7837"}
     levels = [0.90, 0.95]
@@ -419,7 +419,7 @@ def fig_calibration():
     ax.set_xticklabels([f"{int(l*100)}% target" for l in levels])
     ax.set_ylabel("Empirical coverage (%)")
     ax.set_ylim(0, 105)
-    ax.set_title("Predictive-interval calibration (Deep Ensemble, DANAE)")
+    ax.set_title("Predictive-interval calibration (Deep Ensemble)")
     ax.legend(title="method")
     save(fig, "F10_calibration")
 

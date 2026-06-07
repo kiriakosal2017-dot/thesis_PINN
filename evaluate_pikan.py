@@ -1,4 +1,4 @@
-"""Train a single PI-KAN on DANAE and report Test RMSE/MAPE (kW).
+"""Train a single PI-KAN on the source vessel and report Test RMSE/MAPE (kW).
 
 Mirrors the HYBRID path in evaluate_baselines.py: same DataProcessor split, same
 features, chronological validation split, early stopping. Saves best_model_PI_KAN_danae.pt.

@@ -148,7 +148,7 @@ def main():
     _, _, test_loader = make_loaders(base, train_tuple, test_tuple)
 
     print("=" * 70)
-    print("PI-NODE Uncertainty Recalibration (DANAE test set, random 50/50 split)")
+    print("PI-NODE Uncertainty Recalibration (source vessel test set, random 50/50 split)")
     print("=" * 70)
 
     rows = []

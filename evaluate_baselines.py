@@ -1,4 +1,4 @@
-"""Train and evaluate the DATA and HYBRID baselines on DANAE, then persist
+"""Train and evaluate the DATA and HYBRID baselines on the source vessel, then persist
 the best checkpoints and fitted data processor for downstream transfer evaluation."""
 
 import torch
@@ -95,7 +95,7 @@ def main():
     hybrid_model.evaluate(X_test_tab, y_test_tab, dataset_type="Test", data_processor=proc_tabular)
 
     # Persist the fitted scaler so the transfer script can apply the identical
-    # DANAE normalisation to a target vessel's features without refitting.
+    # source vessel normalisation to a target vessel's features without refitting.
     import pickle
     with open("data_processor_danae.pkl", "wb") as f:
         pickle.dump(proc_tabular, f)
