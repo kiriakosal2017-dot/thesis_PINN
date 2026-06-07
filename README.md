@@ -12,15 +12,6 @@ whereas constraining the model with accurate *propeller* physics acts as a stron
 that improves source-domain accuracy **and** enables zero-shot transfer to vessels the model has
 never seen.
 
-Companion documents in `docs/`:
-
-- `docs/PI_NODE_THEORY_AND_ARCHITECTURE.md` — architecture, equations, training infrastructure.
-- `docs/EXPERIMENTAL_PLAN.md` — dataset, methodology, and the full results tables.
-- `docs/PAPER_FINDINGS.md` — the Results-and-Discussion narrative.
-- `docs/RELATED_WORK.md` — positioning against the recent literature.
-- `docs/EXPERIMENT_RUNBOOK.md` — the end-to-end run record and resume notes.
-- `docs/paper/manuscript.md` — the assembled journal-paper draft.
-
 ---
 
 ## 1. The core idea — why the propeller?
@@ -142,10 +133,9 @@ the backbone, so the comparison isolates the architecture.
 ├── make_figures.py                 # Generate the publication figures (F1–F10)
 │
 ├── tests/                          # Standalone unit/regression tests (no pytest required)
-├── .env.<vessel>                   # Per-vessel constants (danae, kastor, menelaos, thalia, thisseas, ...)
+├── .env.example                    # Template config; copy to .env and fill in per-vessel values
 ├── requirements.txt                # Python dependencies
 ├── results/                        # Checkpoints, CSV outputs, and figures (generated; not tracked)
-├── docs/                           # Theory, experimental plan, findings, related work, paper draft
 └── PhD/                            # Raw vessel logs and technical drawings
 ```
 
@@ -175,13 +165,19 @@ second-order automatic differentiation through the B-spline basis.
 
 ## 6. Configuration
 
-All tunable parameters live in `.env` files read by `config.py`. Each vessel has its own file
-carrying that ship's constants; switch the active vessel by copying its file over `.env`:
+All tunable parameters live in `.env` files read by `config.py`. Start from the provided template
+and create one file per vessel, then switch the active vessel by copying its file over `.env`:
 
 ```bash
-cp .env.kastor .env       # work on KASTOR
-cp .env.danae .env        # restore the source vessel
+cp .env.example .env.danae    # then edit .env.danae with the vessel's paths and constants
+cp .env.danae .env            # make DANAE the active vessel
+
+cp .env.kastor .env           # switch to another vessel
+cp .env.danae .env            # restore the source vessel
 ```
+
+Environment files are not version-controlled (they hold local paths and per-vessel constants);
+only `.env.example` is tracked.
 
 The main configuration groups are: **data** (`DATA_FILE_PATH`, `TARGET_COLUMN`, `DROP_COLUMNS`,
 `MIN_POWER`, `MIN_SPEED`), **column names**, **ship constants** (density, length, displacement,
