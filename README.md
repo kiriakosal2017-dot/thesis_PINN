@@ -33,52 +33,165 @@ the network, has the last word.
 
 ---
 
-## 2. Architecture
+## 2. How it works, end to end
 
-The model splits the problem into two physical regimes, so that slow-varying hull behaviour and
-fast-varying weather disturbances do not get tangled together.
+The whole model rests on one division of labour. **The network never predicts power.** Power is a
+quantity we know how to compute exactly from propeller theory, *provided* we know a handful of
+factors that nobody can measure on a working ship. So we let the neural network estimate only those
+hidden factors, and we hand them to the textbook propeller equations to produce the power. The
+network is a virtual sensor; the physics is the calculator. Everything downstream of the network is
+plain, differentiable arithmetic, which is what lets the error signal flow all the way back.
 
-**Branch A: calm-water dynamics (Neural ODE).**
-The inputs here are the calm-water channels (speed-through-water, fore/aft draft, trim, shaft RPM,
-and the slow navigational signals); weather is deliberately left out. An encoder feeds a Neural ODE
-(`torchdiffeq`) whose latent state is integrated over the operational window and then decoded,
-which captures the inertia and transients a static MLP cannot. The branch outputs the calm-water
-factors `[w, t, η_R]`, bounded by a sigmoid.
+The rest of this section walks the data through that pipeline: what goes in, what the network puts
+out, how those outputs become a power number, and what the training loop actually pushes on.
 
-**Branch B: sea-state residual (weather MLP).**
-The inputs are the relative/true wind channels. A small feed-forward network outputs instantaneous
-residual corrections `[Δw, Δt, Δη_R]`.
+### 2.1 The physics we lean on
 
-**Aggregation and analytical physics layer.**
-
-```
-w_total   = w + Δw       (clamped to physical bounds)
-t_total   = t + Δt
-η_R_total = η_R + Δη_R
-
-Va = V_ship · (1 − w_total)          # advance speed
-J  = Va / (n · D)                    # advance coefficient
-K_T(J) = b0 + b1·J + b2·J² + b3·J³   # trainable, initialised at B-series values
-K_Q(J) = c0 + c1·J + c2·J² + c3·J³   # trainable, initialised at B-series values
-Q = K_Q · ρ · n² · D⁵                # torque
-P = 2π · n · Q                       # shaft power
-```
-
-The `K_T` / `K_Q` coefficients are **trainable**, which lets the model absorb long-term propeller
-degradation (biofouling). Physics-informed penalties keep them realistic:
+When a propeller turns, the water it bites into is not arriving at the ship's speed. The hull drags
+a layer of water along with it, so the propeller sees a slower **advance speed** `Va`. The fraction
+of speed "lost" this way is the **wake fraction** `w`:
 
 ```
-L = SmoothL1(P_pred, P_true)
-  + λ_range     · keep K_T, K_Q positive and within bounds
-  + λ_curvature · penalise the 2nd derivative (no unphysical oscillation)
-  + λ_prior     · keep coefficients near the B-series initialisation
-  + λ_η0        · keep open-water efficiency η0 = J·K_T / (2π·K_Q) in [0.40, 0.75]
+Va = V_ship · (1 − w)
 ```
 
-Training uses `ReduceLROnPlateau`, gradient clipping (max-norm 5.0), and a 1.5× learning-rate
-boost on the polynomial coefficients. For **zero-shot transfer** to a new vessel you only swap the
-propeller constants `D`, `P/D`, `Z`; the network weights stay frozen and the analytical layer
-adapts to the new geometry.
+The propeller produces thrust, but the suction it creates over the stern increases the hull's
+resistance, so the thrust the engine must deliver is larger than the net force pushing the ship.
+That gap is the **thrust-deduction factor** `t`. And a propeller working in the disturbed flow
+behind a hull is slightly less (or more) efficient than the same propeller in open water; that
+correction is the **relative rotative efficiency** `η_R`. These three — `w`, `t`, `η_R` — are the
+classic *propulsive factors*. They are real, physically meaningful quantities, and crucially they
+are **not logged by any onboard instrument**. They are exactly the kind of thing a network can be
+useful for.
+
+Once we have the inflow speed, the propeller's behaviour is described non-dimensionally by the
+**advance coefficient** `J` and two coefficient curves, **thrust** `K_T(J)` and **torque** `K_Q(J)`.
+For a given propeller geometry these curves are tabulated by the **Wageningen B-series** — decades
+of systematic open-water tank tests. They are about as close to ground truth as marine
+hydrodynamics gets, which is the whole reason we anchor the model to the *propeller* rather than to
+the much shakier empirical *hull*-resistance formulas (see Section 1).
+
+### 2.2 What goes into the network (inputs)
+
+The model reads **overlapping windows of 10 consecutive timesteps** of operational data, and it
+deliberately splits the channels into two groups so that slow hull behaviour and fast weather
+disturbances never get tangled together:
+
+- **Calm-water channels** — everything that describes the ship's own steady operating point:
+  speed-through-water, fore and aft draft, trim, shaft RPM, and the slow navigational signals.
+  These feed **Branch A**.
+- **Weather channels** — anything whose name mentions wind, wave, or swell. These feed **Branch B**.
+
+Two derived signals, `dt` (time gap) and `dV/dt` (acceleration), are computed but **never fed to the
+model**; they exist only to detect gaps between sequences and to label the steady-vs-transient
+regimes for analysis.
+
+Separately from the windowed *scaled* inputs that the network sees, the pipeline also carries the
+**unscaled** shaft RPM and ship speed of the final timestep. Those two raw physical values are not
+network inputs — they are plugged directly into the propeller equations later, where they need their
+true units (rev/s and m/s), not standardised z-scores.
+
+### 2.3 What the network outputs
+
+Neither branch outputs power. Between them they output the three propulsive factors, split into a
+calm-water baseline and a small weather correction.
+
+**Branch A — calm-water dynamics (Neural ODE).** An encoder turns the calm-water features into an
+initial latent state `z₀`. A **Neural ODE** (`torchdiffeq`) then integrates that state along a
+learned vector field `dz/dt = f_θ(z; context)` over a normalised time interval, and a decoder reads
+the final state into three numbers. The ODE is what gives the model memory of inertia and
+transients that a static MLP cannot represent. A sigmoid squashes the three outputs into physically
+sane intervals:
+
+```
+w_calm   ∈ [0.05, 0.45]      # wake fraction
+t_calm   ∈ [0.05, 0.30]      # thrust deduction
+η_R_calm ∈ [0.95, 1.10]      # relative rotative efficiency
+```
+
+**Branch B — sea-state residual (weather MLP).** A small feed-forward network looks at the weather
+channels of the most recent timestep and outputs three *additive corrections* `[Δw, Δt, Δη_R]`.
+These start near zero (they are scaled down at initialisation) so that early in training the
+calm-water branch sets the baseline and weather only nudges it:
+
+```
+w_total   = clamp(w_calm   + Δw)
+t_total   = clamp(t_calm   + Δt)
+η_R_total = clamp(η_R_calm + Δη_R)
+```
+
+So the network's entire job is to produce these three combined factors per timestep. That is the
+boundary between "learned" and "known".
+
+### 2.4 From factors to power (the analytical layer)
+
+Now the physics takes over. Using the network's `w_total`, the measured shaft speed `n` (rev/s) and
+ship speed `V_ship` (m/s), and the fixed propeller geometry, the power follows by a short chain of
+exact relations — no learned function anywhere in it except the coefficient curves:
+
+```
+Va  = V_ship · (1 − w_total)             # advance speed (Section 2.1)
+J   = Va / (n · D)                       # advance coefficient, D = propeller diameter
+
+K_T(J) = b0 + b1·J + b2·J² + b3·J³       # thrust  coefficient (cubic, trainable)
+K_Q(J) = c0 + c1·J + c2·J² + c3·J³       # torque  coefficient (cubic, trainable)
+
+Q   = K_Q · ρ · n² · D⁵                  # delivered shaft torque  [N·m],  ρ = water density
+P   = 2π · n · Q                         # delivered shaft power    [W]  →  kW
+```
+
+That last line is the model's prediction of shaft power. One honest implementation note: power flows
+through the torque path (`w → J → K_Q → Q → P`), so the factor doing the real work is the **wake
+fraction `w`**, together with the two coefficient curves. The other two factors, `t` and `η_R`, are
+predicted by the network and bounded as above, but in the current code they are **not wired into the
+power equation** — even the open-water efficiency used by the regulariser (Section 2.5) is derived
+from `K_T`/`K_Q`, not from `η_R`. They are carried as part of the propulsive-factor vector and are
+there for completeness and future use; the gradient that trains the network arrives through `w`.
+
+**Why `K_T` and `K_Q` are trainable.** They are initialised at the Wageningen B-series values for
+this propeller, but they are left as learnable parameters. Real propellers foul and wear over months
+at sea, and a frozen B-series curve cannot track that drift. Letting the four coefficients of each
+cubic move lets the model absorb long-term degradation — while regularisation (next) keeps them from
+wandering into physically impossible shapes. The ablation in Section 9 makes the point bluntly:
+freezing these polynomials roughly *triples* the error.
+
+### 2.5 The loss, and what backpropagation actually moves
+
+Predicted power is converted into the same standardised space as the logged target, and the primary
+loss is a **SmoothL1 (Huber)** error against the real torque-meter reading — Huber rather than plain
+MSE because manoeuvring and port approaches throw occasional power outliers that an L2 loss would
+overweight. On top of that sit four soft **physics penalties** that encode prior knowledge about the
+propeller envelope:
+
+```
+L = SmoothL1(P_pred, P_true)                               # fit the measured power
+  + λ_range     · (K_T, K_Q pushed back inside admissible bounds)
+  + λ_curvature · (penalise the polynomials' 2nd derivative — no unphysical oscillation)
+  + λ_prior     · (soft pull of the 8 coefficients toward their B-series values)
+  + λ_η0        · (keep open-water efficiency η0 = J·K_T / (2π·K_Q) in [0.40, 0.75])
+```
+
+Here is the part that makes this a *physics-informed* model rather than a network with a physics
+post-processor bolted on: **the entire chain in Section 2.4 is differentiable, so gradients from the
+power error flow backwards straight through the propeller equations.** When `P_pred` is too high,
+backprop does not adjust some opaque output head — it propagates `∂L/∂P` through `P = 2πnQ`, through
+`Q = K_Q·ρ·n²·D⁵`, through the cubic `K_Q(J)`, and through `J = Va/(nD)` and `Va = V_ship(1−w)`,
+and so arrives at two destinations at once:
+
+1. the **eight polynomial coefficients** `b0..b3, c0..c3`, nudging the propeller curves; and
+2. the **network weights** (encoder, ODE vector field, decoder, weather MLP), because `w_total`
+   sits inside `Va`, so the gradient reaches the parameters that produced `w`.
+
+In other words, the loss teaches the network and the physics *jointly*, and every gradient path has
+a physical meaning. The optimiser is Adam with a mild **1.5× learning-rate boost** on the eight
+polynomial coefficients (they live in a tiny, well-constrained space and can take larger steps than
+the network), **gradient clipping** at max-norm 5.0 to guard against ODE-solver blow-ups, and
+`ReduceLROnPlateau` on the validation loss.
+
+**Why this transfers.** Because the geometry of the new ship enters only through the constants
+`D`, `P/D`, `Z` in the analytical layer, **zero-shot transfer to an unseen vessel is just a matter
+of swapping those constants** — the network weights stay frozen, and the physics re-derives power
+for the new propeller. That is what Section 9's transfer results are showing.
 
 ---
 
