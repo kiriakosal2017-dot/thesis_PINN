@@ -70,25 +70,39 @@ systematic open-water tank tests. That makes them about as close to ground truth
 hydrodynamics gets, and it is why we anchor the model to the propeller rather than to the much
 shakier empirical hull-resistance formulas (see Section 1).
 
-### 2.2 What goes into the network (inputs)
+### 2.2 Inputs: exactly what the model reads
 
-The model reads overlapping windows of 10 consecutive timesteps of operational data, and it splits
-the channels into two groups on purpose, so that slow hull behaviour and fast weather disturbances
-do not get tangled together:
+The model consumes overlapping windows of 10 consecutive timesteps of operational data. Each
+timestep carries the operational channels listed below, split into two groups on purpose, so that
+slow hull behaviour and fast weather disturbances do not get tangled together:
 
-- Calm-water channels: everything that describes the ship's own steady operating point, namely
-  speed-through-water, fore and aft draft, trim, shaft RPM, and the slow navigational signals. These
-  feed Branch A.
-- Weather channels: anything whose name mentions wind, wave, or swell. These feed Branch B.
+| Symbol | Variable | Units | Branch | Role |
+|---|---|---|---|---|
+| `V`   | Speed-through-water        | knots (→ m/s)   | A (calm)    | network input **and** physics |
+| `n`   | Propeller-shaft RPM        | rev/min (→ rev/s) | raw        | physics input (not scaled)    |
+| `T_f` | Draft, fore                | m               | A (calm)    | network input |
+| `T_a` | Draft, aft                 | m               | A (calm)    | network input |
+| `τ`   | Trim (`T_a − T_f`)         | m               | A (calm)    | network input |
+| `ψ`   | True heading               | deg             | A (calm)    | network input |
+| `H_s` | Significant wave height    | m               | B (weather) | network input |
+| `θ_w` | Mean wave direction        | deg             | B (weather) | network input |
+| —     | Wind / swell channels      | —               | B (weather) | network input |
+
+The channels play three distinct roles:
+
+1. **Scaled network inputs.** Every calm and weather channel above is standardised (z-score) and fed
+   to the network as a 10-timestep window. Calm channels feed Branch A; weather channels (any column
+   whose name contains *wind*, *wave*, or *swell*) feed Branch B.
+2. **Raw physical inputs.** The unscaled shaft speed `n` (rev/s) and ship speed `V` (m/s) of the
+   final timestep bypass the network and go straight into the propeller equations of Section 2.4,
+   where they are needed in their true units rather than as z-scores.
+3. **Fixed per-vessel constants** (not inputs, not learned): propeller diameter `D`, pitch ratio
+   `P/D`, blade number `Z`, and water density `ρ`. These come from the vessel's `.env` file and are
+   the only quantities that change when transferring the model to a different ship.
 
 Two derived signals, `dt` (time gap) and `dV/dt` (acceleration), are computed but never fed to the
 model. They exist only to detect gaps between sequences and to label the steady-versus-transient
 regimes for analysis.
-
-Separately from the windowed scaled inputs that the network sees, the pipeline also carries the
-unscaled shaft RPM and ship speed of the final timestep. Those two raw values are not network inputs.
-They go straight into the propeller equations later, where they need their true units (rev/s and m/s)
-rather than standardised z-scores.
 
 ### 2.3 What the network outputs
 
@@ -135,11 +149,30 @@ J   = Va / (n · D)                       # advance coefficient, D = propeller d
 K_T(J) = b0 + b1·J + b2·J² + b3·J³       # thrust  coefficient (cubic, trainable)
 K_Q(J) = c0 + c1·J + c2·J² + c3·J³       # torque  coefficient (cubic, trainable)
 
-Q   = K_Q · ρ · n² · D⁵                  # delivered shaft torque  [N·m],  ρ = water density
+Q   = K_Q · ρ · n² · D⁵                  # delivered shaft torque  [N·m]
 P   = 2π · n · Q                         # delivered shaft power    [W]  →  kW
 ```
 
-That last line is the model's prediction of shaft power. One honest implementation note is worth
+Every symbol in that chain:
+
+| Symbol | Meaning | Source | Units |
+|---|---|---|---|
+| `V_ship` | ship speed-through-water        | **input** (Section 2.2)        | m/s   |
+| `n`      | propeller-shaft speed           | **input** (Section 2.2)        | rev/s |
+| `w_total`| wake fraction                   | **network output** (Section 2.3) | —   |
+| `Va`     | advance speed at the propeller  | computed                       | m/s   |
+| `J`      | advance coefficient             | computed                       | —     |
+| `D`      | propeller diameter              | fixed constant                 | m     |
+| `b0..b3` | `K_T(J)` polynomial coefficients| trainable                      | —     |
+| `c0..c3` | `K_Q(J)` polynomial coefficients| trainable                      | —     |
+| `K_T,K_Q`| thrust / torque coefficients    | computed from `J`              | —     |
+| `ρ`      | sea-water density               | fixed constant                 | kg/m³ |
+| `Q`      | delivered shaft torque          | computed                       | N·m   |
+| `P`      | **delivered shaft power**       | **model output**               | W → kW|
+
+So power is a closed-form function of just two raw measurements (`V_ship`, `n`), one
+network-predicted factor (`w_total`), and the fixed propeller constants. That last line is the
+model's prediction of shaft power. One honest implementation note is worth
 making here. Power flows through the torque path (`w → J → K_Q → Q → P`), so the factor that actually
 drives the result is the wake fraction `w`, together with the two coefficient curves. The other two
 factors, `t` and `η_R`, are predicted by the network and bounded as above, but in the current code
