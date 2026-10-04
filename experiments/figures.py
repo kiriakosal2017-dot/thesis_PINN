@@ -102,22 +102,21 @@ def fig_source():
 # --------------------------------------------------------------------------- Fig. 3
 def fig_zeroshot():
     m = summary()
-    order = ["pinode", "data", "hybrid", "pikan", "data_gru", "Propeller law (constant K_Q)"]
+    order = ["pinode", "data", "hybrid", "pikan"]
     fig, ax = plt.subplots(figsize=(7.0, 3.0))
-    width = 0.13
+    width = 0.19
     for j, k in enumerate(order):
         vals = [m[k][f"zs_{v}"]["mape"][0] for v in VESSELS]
         sds = [m[k][f"zs_{v}"]["mape"][1] for v in VESSELS]
         x = np.arange(len(VESSELS)) + (j - (len(order) - 1) / 2) * (width + 0.012)
-        ax.bar(x, vals, width, color=color_of(k), yerr=[s if s else 0 for s in sds], error_kw=dict(lw=0.8, capsize=1.8, ecolor="#333333"),
-               hatch=None if k in COLOR else "///", edgecolor="white", linewidth=0.6,
-               label=LABEL.get(k, k).replace("\n", " "))
+        ax.bar(x, vals, width, color=color_of(k), yerr=sds, error_kw=dict(lw=0.8, capsize=1.8, ecolor="#333333"),
+               edgecolor="white", linewidth=0.6, label=LABEL[k])
         for xi, v, sd in zip(x, vals, sds):
-            ax.text(xi, (v + (sd or 0)) * 1.06, f"{v:.0f}" if v >= 10 else f"{v:.1f}", ha="center", va="bottom", fontsize=6.0)
+            ax.text(xi, (v + sd) * 1.06, f"{v:.0f}" if v >= 10 else f"{v:.1f}", ha="center", va="bottom", fontsize=6.4)
     ax.set_yscale("log"); ax.set_ylim(2.5, 190); ax.set_yticks([3, 5, 10, 20, 50, 100]); ax.set_yticklabels(["3", "5", "10", "20", "50", "100"])
     ax.set_xticks(range(len(VESSELS))); ax.set_xticklabels([f"Vessel {v}" for v in VESSELS])
     ax.set_ylabel("Zero-shot MAPE (%, log scale)"); ax.grid(axis="x", visible=False)
-    ax.legend(ncol=6, loc="upper center", bbox_to_anchor=(0.5, 1.16), fontsize=7.2, columnspacing=1.1, handlelength=1.2)
+    ax.legend(ncol=4, loc="upper center", bbox_to_anchor=(0.5, 1.16), fontsize=7.4, columnspacing=1.4, handlelength=1.2)
     save(fig, "F3_zeroshot")
 
 
@@ -185,6 +184,68 @@ def fig_calibration():
     save(fig, "F6_calibration")
 
 
+# --------------------------------------------------------------------------- Graphical abstract
+def fig_graphical_abstract():
+    """Journal graphical abstract: 1980 x 792 px at 300 dpi, readable at 13 x 5 cm."""
+    m = summary()
+    fig = plt.figure(figsize=(6.6, 2.64))
+    ax = fig.add_axes([0, 0, 1, 1]); ax.set_xlim(0, 100); ax.set_ylim(0, 40); ax.axis("off"); ax.grid(False)
+
+    def box(x, y, w, h, text, fc, ec, fs=6.4, weight="normal"):
+        ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.25,rounding_size=0.8", fc=fc, ec=ec, lw=1.0))
+        ax.text(x + w / 2, y + h / 2, text, ha="center", va="center", fontsize=fs, fontweight=weight, linespacing=1.3)
+
+    def arrow(x0, x1, y):
+        ax.add_patch(FancyArrowPatch((x0, y), (x1, y), arrowstyle="-|>", mutation_scale=8, lw=1.0, color="#444444"))
+
+    ax.text(2, 37.2, "PI-NODE: the network predicts the wake, the propeller physics gives the power",
+            fontsize=8.6, fontweight="bold", va="center", color="#111111")
+    y0, h = 26.2, 7.0
+    box(2, y0, 13, h, "Ten minutes of\noperational records", "#f2f2f2", "#777777")
+    arrow(15.5, 18.5, y0 + h / 2)
+    box(19, y0, 13, h, "Neural ODE\nencoder", "#dbe9f6", COLOR["pinode"], weight="bold")
+    arrow(32.5, 35.5, y0 + h / 2)
+    box(36, y0, 10, h, "Effective\nwake $w$", "#dbe9f6", COLOR["pinode"])
+    arrow(46.5, 49.5, y0 + h / 2)
+    box(50, y0, 24, h, "Propeller layer: B-series $K_Q(J)$\nof the vessel's own propeller\n" r"$P = 2\pi\rho\,n^3D^5K_Q$",
+        "#d9f0e6", "#009E73", fs=6.0)
+    arrow(74.5, 77.5, y0 + h / 2)
+    box(78, y0, 9, h, "Shaft\npower", "#f2f2f2", "#777777")
+    ax.text(93.5, y0 + h / 2, "new ship:\nswap four\npropeller\nnumbers", ha="center", va="center", fontsize=5.8,
+            color="#8a6400", style="italic", linespacing=1.25)
+
+    # Left panel: accuracy on the training ship.
+    a1 = fig.add_axes([0.075, 0.17, 0.25, 0.40])
+    keys = ["pinode", "data", "hybrid", "pikan"]
+    vals = [m[k]["test"]["rmse"][0] for k in keys]
+    a1.bar(range(4), vals, 0.68, color=[COLOR[k] for k in keys], edgecolor="white", linewidth=0.8)
+    for i, v in enumerate(vals):
+        a1.text(i, v + 12, f"{v:.0f}", ha="center", va="bottom", fontsize=6.4)
+    a1.set_xticks(range(4)); a1.set_xticklabels([LABEL[k] for k in keys], fontsize=6.0)
+    a1.set_ylim(0, 560); a1.set_yticks([]); a1.spines["left"].set_visible(False); a1.grid(False)
+    a1.set_title("Training ship: error (kW)", fontsize=6.8, pad=3)
+
+    # Right panel: error on ships never seen in training.
+    a2 = fig.add_axes([0.42, 0.17, 0.555, 0.40])
+    width = 0.2
+    for j, k in enumerate(keys):
+        zs = [m[k][f"zs_{v}"]["mape"][0] for v in VESSELS]
+        x = np.arange(4) + (j - 1.5) * (width + 0.012)
+        a2.bar(x, zs, width, color=COLOR[k], edgecolor="white", linewidth=0.6, label=LABEL[k])
+        for xi, v in zip(x, zs):
+            a2.text(xi, v + 1.5, f"{v:.0f}", ha="center", va="bottom", fontsize=5.4)
+    a2.set_ylim(0, 112); a2.set_yticks([])
+    a2.spines["left"].set_visible(False); a2.grid(False)
+    a2.set_xticks(range(4)); a2.set_xticklabels([f"Vessel {v}" for v in VESSELS], fontsize=6.0)
+    a2.set_title("Four ships never seen in training: error (%), no retraining", fontsize=6.8, pad=3)
+    a2.legend(ncol=4, fontsize=5.6, loc="upper left", bbox_to_anchor=(0.0, 1.0), columnspacing=0.9, handlelength=1.0, borderpad=0.1)
+    FIG.mkdir(parents=True, exist_ok=True)
+    fig.savefig(FIG / "graphical_abstract.pdf", bbox_inches=None)
+    fig.savefig(FIG / "graphical_abstract.png", dpi=300, bbox_inches=None)
+    plt.close(fig)
+    print("saved graphical_abstract")
+
+
 # --------------------------------------------------------------------------- Supplementary
 def fig_long_training():
     fig, axes = plt.subplots(1, 2, figsize=(7.0, 2.6), sharex=True)
@@ -235,5 +296,5 @@ def fig_wake():
 
 if __name__ == "__main__":
     for f in (fig_architecture, fig_source, fig_zeroshot, fig_fewshot, fig_ablation, fig_calibration,
-              fig_long_training, fig_kq, fig_wake):
+              fig_graphical_abstract, fig_long_training, fig_kq, fig_wake):
         f()
