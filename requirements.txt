@@ -1,0 +1,9 @@
+# Python 3.11+. The reported results were produced with the versions noted in the comments.
+numpy>=1.26          # 1.26.4
+pandas>=2.2          # 2.2.2
+scikit-learn>=1.5    # 1.5.1
+torch>=2.4           # 2.6 (CPU)
+matplotlib>=3.9      # 3.9.2
+python-dotenv>=1.0
+openpyxl             # reading the vessel .xlsx exports
+pytest               # tests only
